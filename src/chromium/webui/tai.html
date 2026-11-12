@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title data-i18n="TAi Browser 设置">TAi Browser 设置</title><link rel="stylesheet" href="tai.css"><link rel="stylesheet" href="agent-setup.css"><link rel="stylesheet" href="shortcuts.css"><script type="module" src="shortcuts.js"></script><script type="module" src="tai.js"></script><script type="module" src="settings-agent.js"></script></head>
+<body>
+<main class="settings-shell">
+  <aside class="settings-sidebar" aria-label="设置导航" data-i18n-aria-label="设置导航">
+    <a class="settings-brand" href="chrome://tai/home.html" aria-label="TAi Browser 首页" data-i18n-aria-label="TAi Browser 首页"><img src="brand-standard-icon.png" width="32" height="32" alt=""><span>TAi Browser<span class="brand-caption"><span data-i18n="留一点空间。">留一点空间。</span></span></span></a>
+    <div class="nav-caption"><span data-i18n="偏好设置">偏好设置</span></div>
+    <nav class="settings-nav" aria-label="TAi 设置分类" data-i18n-aria-label="TAi 设置分类">
+      <a href="#spaces" data-category="spaces"><span data-icon="cr:devices" class="ui-icon" aria-hidden="true"></span><span>Space</span></a>
+      <a href="#appearance" data-category="appearance"><span data-icon="cr:edit-filled" class="ui-icon" aria-hidden="true"></span><span><span data-i18n="外观">外观</span></span></a>
+      <a href="#shortcuts" data-category="shortcuts"><span class="keyboard-nav-icon" aria-hidden="true">⌘</span><span data-i18n="快捷键">快捷键</span></a>
+      <a href="#agent" data-category="agent"><span data-icon="cr:computer" class="ui-icon" aria-hidden="true"></span><span><span data-i18n="Agent 连接">Agent 连接</span></span></a>
+      <a href="#browser" data-category="browser"><span data-icon="cr:chrome-product" class="ui-icon" aria-hidden="true"></span><span><span data-i18n="浏览器">浏览器</span></span></a>
+    </nav>
+  </aside>
+  <div class="settings-content">
+    <header class="settings-heading"><div class="page-kicker"><span data-i18n="你的浏览方式">你的浏览方式</span></div><h1 id="page-title">Space</h1><p id="page-description"><span data-i18n="给不同的事，留一个专属位置。">给不同的事，留一个专属位置。</span></p></header>
+    <section data-settings="spaces" aria-labelledby="space-heading">
+      <div class="section-heading"><h2 id="space-heading"><span data-i18n="个性化 Space">个性化 Space</span></h2><label class="space-select"><span class="sr-only"><span data-i18n="选择 Space">选择 Space</span></span><span class="select-wrap"><select id="space" disabled></select><span data-icon="cr:keyboard-arrow-down" class="ui-icon select-chevron" aria-hidden="true"></span></span></label></div>
+      <form id="space-form" class="settings-card space-editor" novalidate>
+        <div class="space-fields">
+          <div class="identity-row">
+            <details id="icon-picker" class="emoji-picker">
+              <summary class="emoji-trigger" aria-label="更换 Space 图标" data-i18n-aria-label="更换 Space 图标"><span id="selected-icon">🌐</span><span class="emoji-edit"><span data-icon="cr:edit-filled" class="ui-icon" aria-hidden="true"></span></span></summary>
+              <div class="picker-panel"><div class="picker-heading"><strong><span data-i18n="选择图标">选择图标</span></strong><button id="close-picker" class="icon-button" type="button" aria-label="关闭图标选择器" data-i18n-aria-label="关闭图标选择器"><span data-icon="cr:close" class="ui-icon" aria-hidden="true"></span></button></div><div id="emoji-grid" class="emoji-grid" role="group" aria-label="常用 emoji 图标" data-i18n-aria-label="常用 emoji 图标"></div><label class="custom-emoji"><span><span data-i18n="其他 emoji">其他 emoji</span></span><input id="space-icon" maxlength="32" required disabled autocomplete="off" spellcheck="false" aria-label="Space emoji 图标" data-i18n-aria-label="Space emoji 图标"></label></div>
+            </details>
+            <label class="name-field"><span><span data-i18n="名称">名称</span></span><input id="name" maxlength="80" required disabled autocomplete="off"></label>
+          </div>
+          <div class="color-settings"><div class="setting-row"><span class="field-title"><span data-i18n="侧栏颜色">侧栏颜色</span></span><label class="switch-label"><input id="default-color" type="checkbox" checked disabled><span class="switch-track" aria-hidden="true"></span><span><span data-i18n="跟随外观">跟随外观</span></span></label></div><div class="palette" id="color-swatches" role="group" aria-label="Space 颜色" data-i18n-aria-label="Space 颜色"><label class="custom-color" title="自定义颜色" data-i18n-title="自定义颜色"><span class="sr-only"><span data-i18n="自定义侧栏颜色">自定义侧栏颜色</span></span><input id="color" type="color" disabled aria-label="自定义侧栏颜色" data-i18n-aria-label="自定义侧栏颜色"></label></div><p id="color-description" class="field-description"><span data-i18n="使用当前外观的默认颜色。">使用当前外观的默认颜色。</span></p></div>
+          <div class="editor-actions"><span id="space-draft" class="draft-state" aria-live="polite"></span><div><button id="reset-space" class="button-quiet" type="button" disabled><span data-i18n="取消">取消</span></button><button id="save-space" disabled><span data-i18n="保存更改">保存更改</span></button></div></div>
+        </div>
+        <aside class="space-preview" aria-label="Space 实时预览" data-i18n-aria-label="Space 实时预览"><div class="preview-topline"><span><span data-i18n="实时预览">实时预览</span></span><span class="preview-dot"></span></div><div class="preview-scene" role="img" aria-label="光庭建筑与自然光影" data-i18n-aria-label="光庭建筑与自然光影"></div><div class="preview-identity"><span id="preview-icon" class="preview-icon">🌐</span><strong id="preview-name">Space</strong><span><span data-i18n="你的专属空间">你的专属空间</span></span></div></aside>
+      </form>
+    </section>
+    <section data-settings="shortcuts" aria-label="Keyboard shortcuts" hidden><div id="shortcuts-root"></div></section>
+    <section data-settings="appearance" aria-labelledby="appearance-heading" hidden>
+      <div class="section-heading"><h2 id="appearance-heading"><span data-i18n="选择外观">选择外观</span></h2><span class="scope-note"><span data-i18n="当前账号环境">当前账号环境</span></span></div>
+      <div class="theme-options" role="group" aria-label="浏览器外观" data-i18n-aria-label="浏览器外观">
+        <button class="theme-option" type="button" data-theme="standard" aria-pressed="false"><span class="theme-scene standard-scene" role="img" aria-label="蓝紫色光庭建筑" data-i18n-aria-label="蓝紫色光庭建筑"><span class="theme-tag">ATRIUM</span></span><span class="theme-info"><span><strong><span data-i18n="光庭">光庭</span></strong><span><span data-i18n="安静的蓝紫，自然的光影。">安静的蓝紫，自然的光影。</span></span></span><span class="choice-indicator" aria-hidden="true"></span></span></button>
+        <button class="theme-option" type="button" data-theme="pride" aria-pressed="false"><span class="theme-scene pride-scene" role="img" aria-label="彩虹光影穿过庭院" data-i18n-aria-label="彩虹光影穿过庭院"><span class="theme-tag">PRIDE</span></span><span class="theme-info"><span><strong><span data-i18n="同光">同光</span></strong><span><span data-i18n="让每一种颜色，都有位置。">让每一种颜色，都有位置。</span></span></span><span class="choice-indicator" aria-hidden="true"></span></span></button>
+      </div>
+      <label class="sr-only"><span data-i18n="配色">配色</span><select id="edition" disabled tabindex="-1"><option value="standard" data-i18n="标准 · 光庭">标准 · 光庭</option><option value="pride" data-i18n="Pride · 同光">Pride · 同光</option></select></label>
+      <fieldset id="color-mode" class="appearance-mode" disabled>
+        <legend data-i18n="界面模式">界面模式</legend>
+        <div class="appearance-mode-options">
+          <label><input type="radio" name="color-mode" value="system" checked><span data-i18n="跟随系统">跟随系统</span></label>
+          <label><input type="radio" name="color-mode" value="light"><span data-i18n="浅色">浅色</span></label>
+          <label><input type="radio" name="color-mode" value="dark"><span data-i18n="深色">深色</span></label>
+        </div>
+      </fieldset>
+      <div class="appearance-footer"><p><span data-i18n="Space 的自定义颜色会保留。">Space 的自定义颜色会保留。</span></p><button id="save-edition" disabled><span data-i18n="应用外观">应用外观</span></button></div>
+      <form id="language-form" class="settings-card" novalidate>
+        <div class="setting-row"><label for="language"><span data-i18n="界面语言">界面语言</span></label><span class="select-wrap"><select id="language" disabled><option value="system" data-i18n="跟随系统">跟随系统</option><option value="zh-CN">简体中文</option><option value="en">English</option></select><span data-icon="cr:keyboard-arrow-down" class="ui-icon select-chevron" aria-hidden="true"></span></span></div>
+        <p class="field-description" data-i18n="应用于 TAi 页面和菜单栏。">应用于 TAi 页面和菜单栏。</p>
+        <div class="editor-actions"><span id="language-draft" class="draft-state" aria-live="polite"></span><div><button id="reset-language" class="button-quiet" type="button" disabled data-i18n="取消">取消</button><button id="save-language" type="submit" disabled data-i18n="保存语言">保存语言</button></div></div>
+      </form>
+    </section>
+    <section data-settings="agent" aria-labelledby="page-title" hidden>
+      <p id="host-status" role="status"><span data-i18n="正在加载…">正在加载…</span></p>
+      <fieldset id="host-controls" disabled>
+        <label id="host-scope" class="agent-scope" hidden>
+          <span data-i18n="绑定到 Space">绑定到 Space</span>
+          <span class="select-wrap"><select id="host-space"></select><span data-icon="cr:arrow-drop-down" class="ui-icon select-chevron" aria-hidden="true"></span></span>
+        </label>
+        <div id="agent-setup" class="agent-settings"></div>
+      </fieldset>
+    </section>
+    <section data-settings="browser" aria-labelledby="chromium-heading" hidden>
+      <div class="section-heading"><h2 id="chromium-heading"><span data-i18n="浏览器管理">浏览器管理</span></h2><span class="scope-note"><span data-i18n="Chromium 原生功能">Chromium 原生功能</span></span></div>
+      <div class="profile-note"><h2 data-i18n="本地账号环境">本地账号环境</h2><p data-i18n="在右上角的 Profile 菜单管理不同浏览环境。不同环境的网站登录、密码和扩展各自独立。">在右上角的 Profile 菜单管理不同浏览环境。不同环境的网站登录、密码和扩展各自独立。</p><p data-i18n="网站登录与浏览器同步相互独立；TAi 不提供 Chrome Sync。">网站登录与浏览器同步相互独立；TAi 不提供 Chrome Sync。</p></div>
+      <nav class="settings-card browser-links" aria-label="Chromium 管理页" data-i18n-aria-label="Chromium 管理页">
+        <button id="open-welcome" type="button"><span class="management-icon" aria-hidden="true">↓</span><span><strong data-i18n="从其他浏览器导入">从其他浏览器导入</strong><span>Chrome, Arc, Safari</span></span><span data-icon="cr:open-in-new" class="ui-icon" aria-hidden="true"></span></button>
+        <a href="chrome://settings/"><span class="management-icon"><span data-icon="cr:settings-filled" class="ui-icon" aria-hidden="true"></span></span><span><strong><span data-i18n="通用设置">通用设置</span></strong><span><span data-i18n="搜索引擎、隐私与安全、网站权限">搜索引擎、隐私与安全、网站权限</span></span></span><span data-icon="cr:open-in-new" class="ui-icon" aria-hidden="true"></span></a>
+        <a href="chrome://history/"><span class="management-icon"><span data-icon="cr:history" class="ui-icon" aria-hidden="true"></span></span><span><strong><span data-i18n="历史记录">历史记录</span></strong><span><span data-i18n="找回浏览过的页面">找回浏览过的页面</span></span></span><span data-icon="cr:open-in-new" class="ui-icon" aria-hidden="true"></span></a>
+        <a href="chrome://extensions/"><span class="management-icon"><span data-icon="cr:chrome-extension-filled" class="ui-icon" aria-hidden="true"></span></span><span><strong><span data-i18n="扩展管理">扩展管理</span></strong><span><span data-i18n="管理已安装的 Chromium 扩展">管理已安装的 Chromium 扩展</span></span></span><span data-icon="cr:open-in-new" class="ui-icon" aria-hidden="true"></span></a>
+        <a href="chrome://downloads/"><span class="management-icon"><span data-icon="cr:download" class="ui-icon" aria-hidden="true"></span></span><span><strong><span data-i18n="下载内容">下载内容</span></strong><span><span data-i18n="查看文件与下载进度">查看文件与下载进度</span></span></span><span data-icon="cr:open-in-new" class="ui-icon" aria-hidden="true"></span></a>
+      </nav>
+    </section>
+  </div>
+</main>
+<div class="settings-feedback"><p id="status" role="status" aria-live="polite"><span data-i18n="正在加载设置…">正在加载设置…</span></p><button id="refresh" class="button-quiet" type="button" hidden><span data-i18n="重新加载">重新加载</span></button></div>
+</body></html>

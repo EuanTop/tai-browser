@@ -1,0 +1,3 @@
+[mcp_servers.tai-browser]
+command = "/ABSOLUTE/PATH/TO/node"
+args = ["/ABSOLUTE/PATH/TO/TAi/modules/agent-tools/native-stdio.mjs", "--connection-file", "/ABSOLUTE/PATH/TO/USER-SELECTED/connection.json"]

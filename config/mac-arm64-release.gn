@@ -1,0 +1,14 @@
+# Local macOS arm64 release candidate using the pinned Chromium toolchain.
+target_cpu = "arm64"
+is_debug = false
+is_official_build = true
+is_component_build = false
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+enable_dsyms = false
+# The existing checkout does not contain an upstream profile. Keep this
+# local release candidate buildable with the pinned toolchain and limited RAM.
+chrome_pgo_phase = 0
+use_thin_lto = false
+use_remoteexec = false

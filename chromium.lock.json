@@ -1,0 +1,7 @@
+{
+  "repository": "https://chromium.googlesource.com/chromium/src.git",
+  "tag": "157.0.8103.79",
+  "revision": "6dc9bc3bdaea5c35ed6d41fceab2f7a3a2227c4f",
+  "depot_tools_revision": "889099791deff38466d471fa6590951c91a1d8ab",
+  "platform": "mac-arm64"
+}

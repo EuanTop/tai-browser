@@ -1,0 +1,28 @@
+**/node_modules/
+research/evidence/
+research/upstream/
+research/local/
+__pycache__/
+.DS_Store
+
+
+# Local credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# Generated outputs and runtime data
+/out/
+/build/
+/dist/
+/coverage/
+/profiles/
+/user-data/
+*.dmg
+*.sparsebundle/
+*.log

@@ -1,0 +1,12 @@
+{
+  "description": "Compiled TAi new-tab WebUI; not a full browser-window screenshot or design mockup.",
+  "chromiumRevision": "0e66b94549a8bd85f03fbdf189b752d6e7b63c32",
+  "viewport": {
+    "width": 1280,
+    "height": 940,
+    "deviceScaleFactor": 1
+  },
+  "edition": "standard",
+  "syntheticData": true,
+  "sha256": "e580066f72ce4a5364b085ae5c9eebc3ddb156ece40f3cd2a3641f53f09e2e84"
+}

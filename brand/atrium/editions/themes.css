@@ -1,0 +1,26 @@
+/* Visual reference only; native settings/edition switching are not integrated. */
+:root {
+  --edition-sidebar: #f0effb;
+  --edition-selected: #e2e1ff;
+  --edition-accent-ink: #4f55bf;
+  --edition-accent: #777cf3;
+  --edition-chrome-light: #fafaff;
+  --edition-signature: linear-gradient(90deg,#9695ca,#777cf3);
+}
+:root[data-edition="pride"] {
+  --edition-sidebar: #f4f1f8;
+  --edition-selected: #e9e2f3;
+  --edition-accent-ink: #55418a;
+  --edition-accent: #8c70aa;
+  --edition-chrome-light: #fdfafe;
+  --edition-signature: linear-gradient(90deg,#d66a76,#dd9862,#d6b55d,#6f9c80,#6d8eb4,#a081b4);
+}
+/* Spectrum is decorative. Text/focus retain a single accessible ink color. */
+:root[data-edition="pride"] .sidebar {
+  background: radial-gradient(ellipse at 0 0,#fae9ec80,transparent 50%),radial-gradient(ellipse at 100% 100%,#e3eef580,transparent 55%),var(--edition-sidebar);
+}
+:root[data-edition="pride"] .scene {
+  background-image: url('pride-hero.png');
+  background-size: cover;
+  background-position: center;
+}

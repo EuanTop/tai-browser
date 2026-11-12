@@ -1,0 +1,24 @@
+name: Bug report
+description: Report reproducible behavior in TAi Browser.
+body:
+  - type: input
+    id: version
+    attributes:
+      label: TAi and macOS versions
+      description: Copy the TAi version from About TAi Browser and include your Mac’s architecture.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use a test Profile or a public page if possible. Send security reports through SECURITY.md.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: Remove private URLs, account details and connection tokens from any attachments.
+    validations:
+      required: true

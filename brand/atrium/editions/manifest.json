@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "status": "appearance asset reference",
+  "default": "standard",
+  "editions": [
+    {
+      "id": "standard",
+      "name": "标准 · 深蓝紫",
+      "icon": "standard-icon-aligned.png",
+      "hero": {
+        "source": "../standard-hero.png"
+      },
+      "palette": {
+        "iconTop": "#33335C",
+        "iconMid": "#252545",
+        "iconBottom": "#171A31",
+        "sidebar": "#F0EFFB",
+        "ink": "#111735",
+        "accentText": "#4F55BF"
+      }
+    },
+    {
+      "id": "pride",
+      "name": "Pride · 同光",
+      "icon": "pride-icon-pearl-organza.png",
+      "hero": {
+        "source": "pride-hero.png"
+      },
+      "palette": {
+        "sidebar": "#F4F1F8",
+        "ink": "#111735",
+        "accentText": "#55418A",
+        "spectrum": [
+          "#D66A76",
+          "#DD9862",
+          "#D6B55D",
+          "#6F9C80",
+          "#6D8EB4",
+          "#A081B4"
+        ],
+        "iconBackground": [
+          "#592A3E",
+          "#65503D",
+          "#2D5148",
+          "#263C51",
+          "#403052"
+        ]
+      }
+    }
+  ]
+}

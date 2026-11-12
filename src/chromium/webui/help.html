@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="TAi Browser 帮助">TAi Browser Help</title>
+  <link rel="stylesheet" href="tai.css">
+  <link rel="stylesheet" href="help.css">
+  <script type="module" src="help.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <img src="brand-product-icon.png" width="46" height="46" alt="">
+      <div>
+        <h1 data-i18n="发送反馈">Send feedback</h1>
+        <nav aria-label="TAi Browser">
+          <a id="project" href="https://github.com/EuanTop/tai-browser" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a id="contact" href="mailto:euan@mail.bnu.edu.cn">euan@mail.bnu.edu.cn</a>
+        </nav>
+      </div>
+    </header>
+    <form id="report">
+      <label for="subject" data-i18n="标题">Title</label>
+      <input id="subject" type="text" maxlength="120" required>
+      <label for="details" data-i18n="反馈内容">Feedback</label>
+      <textarea id="details" rows="6" maxlength="5000" required></textarea>
+      <p data-i18n="在 GitHub 上确认提交。含个人信息的反馈请用邮件。">Review and submit on GitHub. Use email for feedback with personal information.</p>
+      <div class="actions">
+        <button type="submit" data-i18n="前往 GitHub">Continue on GitHub</button>
+        <a id="email" href="mailto:euan@mail.bnu.edu.cn" data-i18n="打开邮件草稿">Open email draft</a>
+        <button class="button-quiet" type="button" id="copy" data-i18n="复制反馈">Copy feedback</button>
+      </div>
+      <p id="status" role="status"></p>
+    </form>
+  </main>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "name": "@tai/migration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./browser": "./src/browser.mjs",
+    "./panel": "./src/panel.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build:browser": "node scripts/build-browser.mjs",
+    "test:browser": "node scripts/check-browser.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@noble/hashes": "1.8.0",
+    "htmlparser2": "10.0.0",
+    "marked": "18.1.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "linkedom": "0.18.12"
+  }
+}

@@ -1,0 +1,39 @@
+TAi Browser
+Copyright (c) 2026, TAi Browser contributors.
+Former development names: Sidebar Browser, Tabria and TAi.
+
+TAi Browser-authored source code, build tools, tests and documentation in this
+repository are licensed under BSD-3-Clause; see LICENSE. Existing file-level
+copyright and license notices remain in effect. Historical notices naming
+Sidebar Browser or Tabria contributors identify this project's contributors
+under its earlier development names.
+
+Chromium and third-party components retain their respective copyright notices
+and licenses. The root LICENSE does not relicense those components.
+
+The Chromium top-level license from revision
+6dc9bc3bdaea5c35ed6d41fceab2f7a3a2227c4f
+is reproduced verbatim in licenses/chromium/LICENSE.
+Source: https://chromium.googlesource.com/chromium/src/+/6dc9bc3bdaea5c35ed6d41fceab2f7a3a2227c4f/LICENSE
+
+That top-level Chromium license is not a complete inventory of the licenses
+for an assembled browser. A binary release must include the notices and any
+other materials required by the components actually included in that build,
+preserving Chromium's generated credits and third-party license information.
+The present development build has not completed that distribution review.
+
+REA and other research tools are development dependencies, not browser runtime
+components. Their original licenses govern those tools. Private research
+artifacts, browser profiles and downloaded application binaries are not
+included in this project's source distribution.
+
+Standalone feature-module dependencies are pinned in each module's
+package-lock.json. Reuse records and retained license texts are under
+modules/migration/THIRD_PARTY.md and third-party/,
+modules/clipping/third-party/, modules/readers/third-party/, and
+modules/{agent-connect,agent-tools,models}/INTEGRATION.md and licenses/.
+Those records do not replace the complete notice inventory required when
+assembling a binary product, including transitive dependencies.
+
+The Pi badge used in the Agent toolbar is from the Pi press kit at
+https://pi.dev/press-kit. Its MIT notice is in brand/agents/PI-LICENSE.txt.

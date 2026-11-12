@@ -1,0 +1,16 @@
+{
+  "name": "@tai/agent-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "ajv": "8.20.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

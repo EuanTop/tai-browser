@@ -1,0 +1,1 @@
+{"name":"@tai/readers","private":true,"type":"module","version":"0.1.0","scripts":{"test":"node --test test/*.test.mjs"},"dependencies":{"dompurify":"3.4.17","marked":"18.1.1","jsdom":"26.1.0"}}

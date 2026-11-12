@@ -1,0 +1,16 @@
+{
+  "name": "@tai/studio",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "test": "node --test test/*.test.mjs ../library/*.test.mjs",
+    "build-package": "node compile-package.mjs"
+  },
+  "dependencies": {
+    "linkedom": "0.18.13"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

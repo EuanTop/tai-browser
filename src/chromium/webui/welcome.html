@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="欢迎使用 TAi Browser">欢迎使用 TAi Browser</title>
+  <link rel="icon" href="brand-standard-icon.png">
+  <link rel="stylesheet" href="tai.css">
+  <link rel="stylesheet" href="welcome.css">
+  <script type="module" src="welcome.js"></script>
+</head>
+<body>
+  <main class="welcome" hidden>
+    <header id="welcome-intro">
+      <img class="welcome-logo" src="brand-product-icon.png" width="76" height="76" alt="">
+      <h1 data-i18n="欢迎使用 TAi Browser">欢迎使用 TAi Browser</h1>
+    </header>
+    <section id="welcome-import" class="welcome-import" aria-labelledby="import-heading" hidden>
+      <button id="import-back" class="button-quiet" type="button" data-i18n="返回">返回</button>
+      <h1 id="import-heading" tabindex="-1" data-i18n="从其他浏览器导入">从其他浏览器导入</h1>
+      <fieldset id="import-sources" class="welcome-sources">
+        <legend class="sr-only" data-i18n="选择来源浏览器">选择来源浏览器</legend>
+        <label><input type="radio" name="source" value="chrome" checked><span>Chrome</span></label>
+        <label><input type="radio" name="source" value="arc"><span>Arc</span></label>
+        <label><input type="radio" name="source" value="safari"><span>Safari</span></label>
+      </fieldset>
+      <p id="import-destination">
+        <span data-source-info="chrome" data-i18n="从 HTML 或 JSON 导入书签和文件夹，保存到侧栏的新 Space。">从 HTML 或 JSON 导入书签和文件夹，保存到侧栏的新 Space。</span>
+        <span hidden data-source-info="arc" data-i18n="从 Markdown 或侧栏 JSON 导入 Spaces、文件夹和网页链接。">从 Markdown 或侧栏 JSON 导入 Spaces、文件夹和网页链接。</span>
+        <span hidden data-source-info="safari" data-i18n="从书签 HTML 导入书签和文件夹，保存到侧栏的新 Space。">从书签 HTML 导入书签和文件夹，保存到侧栏的新 Space。</span>
+      </p>
+      <button id="pick-file" type="button" aria-describedby="import-destination" data-i18n="选择文件并导入">选择文件并导入</button>
+      <details id="export-help">
+        <summary data-i18n="如何导出？">如何导出？</summary>
+        <p data-source-info="chrome" data-i18n="在 Chrome 书签管理器中选择「导出书签」。">在 Chrome 书签管理器中选择「导出书签」。</p>
+        <p hidden data-source-info="arc" data-i18n="Arc 设置 → 高级 → 导出数据。选择导出的 Markdown 或侧栏 JSON 文件。">Arc 设置 → 高级 → 导出数据。选择导出的 Markdown 或侧栏 JSON 文件。</p>
+        <p hidden data-source-info="safari" data-i18n="从 Safari 导出书签 HTML。若得到 ZIP，请先解压。">从 Safari 导出书签 HTML。若得到 ZIP，请先解压。</p>
+        <a id="safari-native" href="chrome://settings/importData" target="_blank" rel="noopener" hidden data-i18n="打开 Safari 导入设置">打开 Safari 导入设置</a>
+      </details>
+      <details>
+        <summary data-i18n="导入已保存的密码">导入已保存的密码</summary>
+        <a id="import-passwords" href="chrome://password-manager/settings?import=true" target="_blank" rel="noopener" data-i18n="打开密码导入">打开密码导入</a>
+        <p data-i18n="导入后删除明文密码 CSV。">导入后删除明文密码 CSV。</p>
+      </details>
+    </section>
+    <p id="welcome-status" role="status" aria-live="polite"></p>
+    <footer>
+      <button id="open-import" class="button-quiet" type="button" data-i18n="从其他浏览器导入">从其他浏览器导入</button>
+      <button id="continue" type="button" data-i18n="开始浏览">开始浏览</button>
+    </footer>
+  </main>
+</body>
+</html>

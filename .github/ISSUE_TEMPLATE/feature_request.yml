@@ -1,0 +1,15 @@
+name: Feature request
+description: Suggest an improvement to a browsing or agent workflow.
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: What should TAi do differently?
+    validations:
+      required: true

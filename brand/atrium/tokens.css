@@ -1,0 +1,40 @@
+/* TAi Browser · Atrium. Reference tokens; native Chromium integration is pending. */
+:root {
+  --tai-canvas: #f0effb;
+  --tai-surface: #ffffff;
+  --tai-surface-soft: #f6f5fc;
+  --tai-ink: #111735;
+  --tai-ink-muted: #606784;
+  --tai-line: #dddff0;
+  --tai-selected: #e2e1ff;
+  --tai-accent: #777cf3;
+  --tai-accent-ink: #4f55bf;
+  --tai-focus: #5055c2;
+  --tai-action: #32345f;
+  --tai-on-action: #ffffff;
+  --tai-radius-control: 10px;
+  --tai-radius-panel: 16px;
+  --tai-radius-scene: 20px;
+  --tai-shadow-panel: 0 6px 24px rgb(22 26 57 / 5%);
+  --tai-space-duration: 260ms;
+  --tai-space-easing: cubic-bezier(.22, 1, .36, 1);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-tai-theme="light"]) {
+    --tai-canvas: #15162a;
+    --tai-surface: #1c1f36;
+    --tai-surface-soft: #24273e;
+    --tai-ink: #efefff;
+    --tai-ink-muted: #babdd4;
+    --tai-line: #414661;
+    --tai-selected: #3b3e65;
+    --tai-accent: #adaeff;
+    --tai-accent-ink: #c4c6ff;
+    --tai-focus: #b7bbff;
+    --tai-action: #c4c6ff;
+    --tai-on-action: #15162a;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --tai-space-duration: 0ms; }
+}

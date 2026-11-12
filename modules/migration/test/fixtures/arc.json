@@ -1,0 +1,25 @@
+{
+ "version":1,"sidebar":{"containers":[{"global":{}},{
+  "topAppsContainerIDs":[{"default":true},"fav-default",{"custom":{"_0":{"machineID":"synthetic-machine","directoryBasename":"Work"}}},"fav-work"],
+  "spaces":[
+   "s1",{"title":"个人 🏡","profile":{"default":true},"containerIDs":["pinned","pin1",{"unpinned":{"_0":{"shared":{}}}},"open1"],"customInfo":{"iconType":{"emoji_v2":"🏡"}}},
+   "s2",{"title":"工作","profile":{"custom":{"_0":{"machineID":"synthetic-machine","directoryBasename":"Work"}}},"containerIDs":[{"pinned":{}},"pin2","unpinned","open2"]},
+   "s3",{"title":"Empty space","profile":{"default":true},"containerIDs":["pinned","pin3"]}
+  ],
+  "items":[
+   "fav-default",{"childrenIds":["f1"]},"f1",{"title":"Account personal","data":{"tab":{"savedURL":"https://example.com/login"}}},
+   "fav-work",{"childrenIds":["f2"]},"f2",{"title":"Account work","data":{"tab":{"savedURL":"https://example.com/login"}}},
+   "pin1",{"childrenIds":["empty","folder","same1"]},
+   "empty",{"title":"Empty","childrenIds":[]},
+   "folder",{"title":"Nested","childrenIds":["deep"]},
+   "deep",{"title":"Custom title","data":{"tab":{"savedTitle":"Original","savedURL":"https://example.com/page"}}},
+   "same1",{"data":{"tab":{"savedTitle":"Repeat","savedURL":"https://example.com/page"}}},
+   "open1",{"childrenIds":["temp","temp-folder"]},
+   "temp",{"data":{"tab":{"savedURL":"https://example.com/page"}}},
+   "temp-folder",{"title":"Open folder","childrenIds":["temp2"]},
+   "temp2",{"data":{"tab":{"savedURL":"https://example.com/open"}}},
+   "pin2",{"childrenIds":["work"]},"work",{"data":{"tab":{"savedURL":"https://example.com/page"}}},
+   "open2",{"childrenIds":[]},"pin3",{"childrenIds":[]}
+  ]
+ }]}
+}
