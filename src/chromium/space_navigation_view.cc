@@ -888,9 +888,9 @@ END_METADATA
 namespace {
 constexpr int kPageEdgeSamples = 128;
 
-bool SimilarColors(SkColor a, SkColor b) {
-  const auto close = [](int first, int second) {
-    return std::abs(first - second) <= 10;
+bool SimilarColors(SkColor a, SkColor b, int tolerance = 10) {
+  const auto close = [tolerance](int first, int second) {
+    return std::abs(first - second) <= tolerance;
   };
   return close(SkColorGetR(a), SkColorGetR(b)) &&
          close(SkColorGetG(a), SkColorGetG(b)) &&
@@ -3589,7 +3589,10 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     navigate(dark_page, fixture_root.Resolve("solid-header"));
     expect("dark full-width header supplies the toolbar color above a white article",
            wait_for([&] {
-             return page_chrome_color_ == SkColorSetRGB(28, 25, 22) &&
+             // Display-space readback quantizes to 8 bits before conversion
+             // to sRGB. Allow rounding, but check the native paint exactly.
+             return page_chrome_color_ &&
+                    SimilarColors(*page_chrome_color_, SkColorSetRGB(28, 25, 22), 4) &&
                     edge_color() == page_chrome_color_ &&
                     !color_utils::IsDark(browser_view->toolbar()->GetColorProvider()
                                              ->GetColor(kColorToolbarButtonIcon));
