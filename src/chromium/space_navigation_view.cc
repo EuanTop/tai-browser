@@ -2122,6 +2122,11 @@ void SpaceNavigationView::SwipeHandler::Complete(base::TimeTicks release) {
   owner_->CompleteSpaceSwipe(offset, flick);
 }
 void SpaceNavigationView::SwipeHandler::OnMouseEvent(ui::MouseEvent* event) {
+#if BUILDFLAG(IS_MAC)
+  // Views can redispatch an unconsumed trackpad update as a wheel event.
+  // Keep that fallback from bypassing the trackpad's direction and origin.
+  if (phase_ != Phase::kIdle) return;
+#endif
   if (owner_->model_ && !CurrentDrag().source &&
       event->type() == ui::EventType::kMousewheel && IsOverSidebar(*event)) {
     auto* wheel = static_cast<ui::MouseWheelEvent*>(event);
