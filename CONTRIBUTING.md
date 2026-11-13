@@ -21,6 +21,7 @@ Keep everything under one TAi project parent, with separate directories for the 
 - Start a focused `feat/<task>` or `fix/<task>` branch from reviewed `main`. Use a separate worktree when parallel work is actually arranged; keep it under `workspace/worktrees/`, outside the integration repository.
 - Define file ownership and acceptance criteria before parallel edits. Preserve existing historical worktrees and branches; do not reset, delete or overwrite another contributor's work.
 - Review the diff and required checks before merging a change into `main`.
+- Open separate issues for independently reproducible bugs or interaction requests. One focused PR may address related issues. Link each with its own `Closes #…` line when the PR resolves it. Use a draft while validation is pending.
 - Keep product changes separate from unrelated documentation or tooling changes when that makes them easier to review. Never rewrite published history to hide a failed iteration.
 
 **共享 Chromium 只能由 `workspace/sidebar-browser/` 集成 checkout 串行操作。** prepare、repair、overlay apply、原生 build 与运行检查共用 `workspace/build-cache/locks/chromium.lock`，工具会拒绝在功能 worktree 执行。其他 worktree 只运行不改共享上游的独立模块检查。构建期间冻结产品源码，避免生成副本与收据不一致。

@@ -4,6 +4,8 @@ The TAi repository contains the product source, build overlay, assets, tests and
 
 ## macOS releases
 
+Bundle routine changes into the next release. Publish a new release when a substantial user-facing update is ready. Local QA builds and merged pull requests can happen between releases.
+
 1. Review the exact source snapshot and Git history. Check dependencies, licenses, attribution and the pinned Chromium security release.
 2. Build for Apple Silicon with `config/mac-arm64-release.gn`. The standalone app includes the browser, native launcher, Node and locked Agent runtime dependencies. It uses the same product bundle identity and Profile location across updates.
 3. Verify the app signature, runtime dependencies, DMG integrity, launch, Profile upgrade, browser settings and Agent tools. Run verification with synthetic data. Document the platforms and checks covered.

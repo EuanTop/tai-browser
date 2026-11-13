@@ -42,10 +42,24 @@ def main():
 
     class ReloadFixture(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            pages = {
+                '/solid-header': (
+                    b'<meta name="theme-color" content="#f8f7f6">'
+                    b'<body style="margin:0;background:white;color:#222">'
+                    b'<header style="height:64px;background:#1c1916"></header>'
+                    b'<main>Light article</main>'),
+                '/mixed-header': (
+                    b'<meta name="theme-color" content="#ede8dd">'
+                    b'<body style="margin:0;background:white;color:#222">'
+                    b'<header style="height:64px;background:linear-gradient('
+                    b'90deg,#171513 50%,#a37e45 50%)"></header>'
+                    b'<main>Light article</main>'),
+            }
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
-            self.wfile.write(b'<title>TAi cookie reload fixture</title><p>Disposable test page</p>')
+            self.wfile.write(pages.get(
+                self.path, b'<title>TAi cookie reload fixture</title><p>Disposable test page</p>'))
         def log_message(self, *_):
             pass
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), ReloadFixture)

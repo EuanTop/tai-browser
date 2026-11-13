@@ -36,6 +36,7 @@
 #include "base/pickle.h"
 #include "base/run_loop.h"
 #include "base/timer/elapsed_timer.h"
+#include "base/timer/timer.h"
 #include "base/trace_event/trace_event.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h"
@@ -96,6 +97,7 @@
 #include "components/sessions/content/session_tab_helper.h"
 #include "components/sessions/core/tab_restore_service.h"
 #include "components/vector_icons/vector_icons.h"
+#include "components/viz/common/frame_sinks/copy_output_result.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/color/color_provider_key.h"
 #include "ui/color/color_id.h"
@@ -104,7 +106,11 @@
 #include "ui/color/color_recipe.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
+#include "content/public/browser/page.h"
+#include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents_observer.h"
+#include "third_party/skia/include/core/SkBitmap.h"
+#include "third_party/skia/include/core/SkColorSpace.h"
 #include "ui/views/paint_info.h"
 #include "base/strings/escape.h"
 #include "sidebar_browser/workspace_state.h"
@@ -129,6 +135,7 @@
 #include "ui/views/controls/textfield/textfield.h"
 #include "ui/views/view_tracker.h"
 #include "ui/views/view_class_properties.h"
+#include "ui/views/view_observer.h"
 #include "ui/views/view_utils.h"
 
 namespace sidebar {
@@ -250,8 +257,10 @@ class SidebarButton : public views::LabelButton {
  public:
   using views::LabelButton::label;
   SidebarButton(PressedCallback callback, std::u16string text, bool selected,
-                bool dark, int radius = 8)
-      : views::LabelButton(std::move(callback), text), selected_(selected), dark_(dark), radius_(radius) {
+                bool dark, int radius = 8, bool paint_background = true)
+      : views::LabelButton(std::move(callback), text),
+        selected_(selected), dark_(dark), radius_(radius),
+        paint_background_(paint_background) {
     SetHorizontalAlignment(text.empty() ? gfx::ALIGN_CENTER : gfx::ALIGN_LEFT);
     SetImageLabelSpacing(text.empty() ? 0 : 10);
     SetBorder(views::CreateEmptyBorder(gfx::Insets::VH(6, 9)));
@@ -282,6 +291,7 @@ class SidebarButton : public views::LabelButton {
   }
  private:
   void UpdateBackground() {
+    if (!paint_background_) return;
     const bool hovered = GetState() == STATE_HOVERED || GetState() == STATE_PRESSED;
     if (selected_ || hovered) {
       SetBackground(views::CreateRoundedRectBackground(
@@ -292,8 +302,156 @@ class SidebarButton : public views::LabelButton {
   int drop_mark_ = 0;
   const bool selected_, dark_;
   const int radius_;
+  const bool paint_background_;
 };
 BEGIN_METADATA(SidebarButton)
+END_METADATA
+
+constexpr int kTabRowActionWidth = 26;
+constexpr int kTabRowActionHeight = 28;
+constexpr int kTabRowActionInset = 5;
+
+class TabRowCloseButton final : public views::ImageButton {
+  METADATA_HEADER(TabRowCloseButton, views::ImageButton)
+
+ public:
+  TabRowCloseButton(PressedCallback callback, bool saved, SkColor ink,
+                    std::u16string label)
+      : views::ImageButton(std::move(callback)), ink_(ink) {
+    SetImageHorizontalAlignment(ALIGN_CENTER);
+    SetImageVerticalAlignment(ALIGN_MIDDLE);
+    SetImageModel(STATE_NORMAL, ui::ImageModel::FromVectorIcon(
+                                    saved ? kRemoveIcon : kCloseIcon, ink, 14));
+    SetTooltipText(label);
+    GetViewAccessibility().SetName(label);
+    SetFocusBehavior(FocusBehavior::ALWAYS);
+    SetRequestFocusOnPress(false);
+  }
+
+ private:
+  void StateChanged(ButtonState old_state) override {
+    ImageButton::StateChanged(old_state);
+    SchedulePaint();
+  }
+
+  void OnPaintBackground(gfx::Canvas* canvas) override {
+    if (GetState() != STATE_HOVERED && GetState() != STATE_PRESSED &&
+        !HasFocus()) {
+      return;
+    }
+    cc::PaintFlags flags;
+    flags.setAntiAlias(true);
+    flags.setColor(SkColorSetA(ink_, GetState() == STATE_PRESSED ? 49 : 30));
+    canvas->DrawCircle(gfx::PointF(GetLocalBounds().CenterPoint()), 10, flags);
+  }
+
+  const SkColor ink_;
+};
+BEGIN_METADATA(TabRowCloseButton)
+END_METADATA
+
+class TabRow final : public views::View, public views::ViewObserver {
+  METADATA_HEADER(TabRow, views::View)
+
+ public:
+  TabRow(views::Button::PressedCallback activate,
+         views::Button::PressedCallback close, std::u16string title,
+         std::u16string close_label, bool selected, bool dark,
+         bool collapsed, bool saved, int depth)
+      : selected_(selected), dark_(dark) {
+    SetBorder(views::CreateEmptyBorder(gfx::Insets::TLBR(0, depth * 12, 0, 0)));
+    SetUseDefaultFillLayout(true);
+    SetNotifyEnterExitOnChild(true);
+    title_button_ = AddChildView(std::make_unique<SidebarButton>(
+        std::move(activate), collapsed ? std::u16string() : title,
+        false, dark, 8, false));
+    if (close) title_button_->SetFocusBehavior(FocusBehavior::ALWAYS);
+    title_button_->SetTooltipText(title);
+    if (collapsed) {
+      title_button_->GetViewAccessibility().SetName(title);
+    } else {
+      // Reserve the trailing slot in every row, including swipe previews.
+      title_button_->SetBorder(views::CreateEmptyBorder(gfx::Insets::TLBR(
+          6, 9, 6, kTabRowActionWidth + kTabRowActionInset + 3)));
+      if (close) {
+        close_button_ = AddChildView(std::make_unique<TabRowCloseButton>(
+            std::move(close), saved,
+            dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53),
+            std::move(close_label)));
+        close_button_->SetProperty(views::kViewIgnoredByLayoutKey, true);
+        close_button_->SetVisible(false);
+        close_button_->AddObserver(this);
+      }
+    }
+    title_button_->AddObserver(this);
+    title_state_subscription_ = title_button_->AddStateChangedCallback(
+        base::BindRepeating(&TabRow::UpdateAppearance, base::Unretained(this)));
+  }
+
+  ~TabRow() override {
+    title_button_->RemoveObserver(this);
+    if (close_button_) close_button_->RemoveObserver(this);
+  }
+
+  SidebarButton* title_button() const { return title_button_; }
+
+ private:
+  void OnBoundsChanged(const gfx::Rect& previous_bounds) override {
+    if (!close_button_) return;
+    const auto content = GetContentsBounds();
+    close_button_->SetBounds(
+        std::max(content.x(),
+                 content.right() - kTabRowActionWidth - kTabRowActionInset),
+        content.y() + (content.height() - kTabRowActionHeight) / 2,
+        kTabRowActionWidth, kTabRowActionHeight);
+  }
+
+  void OnMouseEntered(const ui::MouseEvent& event) override {
+    hovered_ = true;
+    UpdateAppearance();
+  }
+
+  void OnMouseExited(const ui::MouseEvent& event) override {
+    hovered_ = false;
+    UpdateAppearance();
+  }
+
+  void OnViewFocused(views::View* view) override { UpdateAppearance(); }
+  void OnViewBlurred(views::View* view) override { UpdateAppearance(); }
+
+  void UpdateAppearance() {
+    if (close_button_) {
+      const bool show_close =
+          hovered_ || title_button_->HasFocus() || close_button_->HasFocus();
+      if (close_button_->GetVisible() != show_close)
+        close_button_->SetVisible(show_close);
+    }
+    SchedulePaint();
+  }
+
+  void OnPaintBackground(gfx::Canvas* canvas) override {
+    const bool pressed = title_button_->GetState() == views::Button::STATE_PRESSED;
+    const bool emphasized = hovered_ || title_button_->HasFocus() ||
+                            (close_button_ && close_button_->HasFocus());
+    if (!selected_ && !emphasized && !pressed) return;
+    int alpha = dark_ ? 22 : 70;
+    if (selected_) alpha = dark_ ? 45 : 180;
+    if (pressed) alpha += dark_ ? 12 : 24;
+    cc::PaintFlags flags;
+    flags.setAntiAlias(true);
+    flags.setColor(SkColorSetARGB(alpha, 255, 255, 255));
+    const auto bounds = GetMirroredRect(GetContentsBounds());
+    canvas->DrawRoundRect(gfx::RectF(bounds), 8, flags);
+  }
+
+  const bool selected_;
+  const bool dark_;
+  bool hovered_ = false;
+  raw_ptr<SidebarButton> title_button_;
+  raw_ptr<TabRowCloseButton> close_button_ = nullptr;
+  base::CallbackListSubscription title_state_subscription_;
+};
+BEGIN_METADATA(TabRow)
 END_METADATA
 
 class NewTabButton final : public SidebarButton {
@@ -727,18 +885,167 @@ class FolderRevealView final : public views::View, public gfx::AnimationDelegate
 BEGIN_METADATA(FolderRevealView)
 END_METADATA
 
-// Observe only the visible page. Background Agent pages cannot recolor the
-// user's window. Same-palette color changes only repaint the toolbar.
+namespace {
+constexpr int kPageEdgeSamples = 128;
+
+bool SimilarColors(SkColor a, SkColor b, int tolerance = 10) {
+  const auto close = [tolerance](int first, int second) {
+    return std::abs(first - second) <= tolerance;
+  };
+  return close(SkColorGetR(a), SkColorGetR(b)) &&
+         close(SkColorGetG(a), SkColorGetG(b)) &&
+         close(SkColorGetB(a), SkColorGetB(b));
+}
+
+// Reject mixed edges, such as images or side-by-side panels. A few pixels of
+// foreground ink should not prevent a solid header from supplying its color.
+std::optional<SkColor> UniformPageEdge(const SkBitmap& bitmap) {
+  if (bitmap.drawsNothing() || bitmap.width() != kPageEdgeSamples ||
+      bitmap.height() != 1) {
+    return std::nullopt;
+  }
+  // The compositor can return display-space pixels. The browser palette
+  // consumes sRGB, so convert before comparing with the document color.
+  SkBitmap srgb;
+  const auto info = SkImageInfo::MakeN32(
+      kPageEdgeSamples, 1, kUnpremul_SkAlphaType, SkColorSpace::MakeSRGB());
+  srgb.allocPixels(info);
+  if (!bitmap.readPixels(info, srgb.getPixels(), srgb.rowBytes(), 0, 0))
+    return std::nullopt;
+  std::array<SkColor, kPageEdgeSamples> pixels;
+  std::array<uint8_t, kPageEdgeSamples> red, green, blue;
+  for (int x = 0; x < kPageEdgeSamples; ++x) {
+    const SkColor pixel = srgb.getColor(x, 0);
+    if (SkColorGetA(pixel) != SK_AlphaOPAQUE) return std::nullopt;
+    pixels[x] = pixel;
+    red[x] = SkColorGetR(pixel);
+    green[x] = SkColorGetG(pixel);
+    blue[x] = SkColorGetB(pixel);
+  }
+  auto median = [](auto& channel) {
+    auto center = channel.begin() + kPageEdgeSamples / 2;
+    std::nth_element(channel.begin(), center, channel.end());
+    return *center;
+  };
+  const SkColor center = SkColorSetRGB(median(red), median(green), median(blue));
+  int matches = 0;
+  int r = 0, g = 0, b = 0;
+  for (const SkColor pixel : pixels) {
+    if (!SimilarColors(pixel, center)) continue;
+    ++matches;
+    r += SkColorGetR(pixel);
+    g += SkColorGetG(pixel);
+    b += SkColorGetB(pixel);
+  }
+  if (matches * 10 < kPageEdgeSamples * 9) return std::nullopt;
+  return SkColorSetRGB(r / matches, g / matches, b / matches);
+}
+}  // namespace
+
+// Only the active document in a visible, regular browser window is sampled.
 class SpaceNavigationView::PageChromeObserver final : public content::WebContentsObserver {
  public:
   explicit PageChromeObserver(base::RepeatingClosure changed) : changed_(std::move(changed)) {}
-  using content::WebContentsObserver::Observe;
-  void DidChangeThemeColor() override { changed_.Run(); }
-  void OnBackgroundColorChanged() override { changed_.Run(); }
-  void PrimaryPageChanged(content::Page&) override { changed_.Run(); }
-  void WebContentsDestroyed() override { Observe(nullptr); changed_.Run(); }
+
+  void SetActiveContents(content::WebContents* contents, bool sample_edge) {
+    if (web_contents() == contents && sample_edge_ == sample_edge) return;
+    Observe(contents);
+    sample_edge_ = sample_edge;
+    ResetSample();
+    ScheduleSample();
+  }
+
+  std::optional<SkColor> edge_color() const { return edge_color_; }
+
  private:
+  void DidChangeThemeColor() override { PageColorsChanged(); }
+  void OnBackgroundColorChanged() override { PageColorsChanged(); }
+  void DidFirstVisuallyNonEmptyPaint() override { ScheduleSample(); }
+  void DidStopLoading() override { ScheduleSample(); }
+  void PrimaryMainFrameWasResized(bool width_changed) override {
+    if (width_changed) ScheduleSample();
+  }
+  void DidGetUserInteraction(const blink::WebInputEvent&) override {
+    ScheduleSample();
+  }
+  void OnVisibilityChanged(content::Visibility visibility) override {
+    if (visibility == content::Visibility::VISIBLE) ScheduleSample();
+  }
+  void PrimaryPageChanged(content::Page&) override {
+    ResetSample();
+    PageColorsChanged();
+  }
+  void WebContentsDestroyed() override {
+    SetActiveContents(nullptr, false);
+    changed_.Run();
+  }
+
+  void PageColorsChanged() {
+    changed_.Run();
+    ScheduleSample();
+  }
+
+  void ResetSample() {
+    edge_color_.reset();
+    timer_.Stop();
+    sample_pending_ = false;
+    ++document_generation_;
+  }
+
+  bool CanSample() const {
+    return sample_edge_ && web_contents() && !web_contents()->IsCrashed() &&
+           web_contents()->GetLastCommittedURL().SchemeIsHTTPOrHTTPS() &&
+           web_contents()->GetVisibility() == content::Visibility::VISIBLE;
+  }
+
+  void ScheduleSample() {
+    if (!CanSample() || timer_.IsRunning()) return;
+    if (copy_in_flight_) {
+      sample_pending_ = true;
+      return;
+    }
+    timer_.Start(FROM_HERE, base::Milliseconds(180), this,
+                 &PageChromeObserver::SampleEdge);
+  }
+
+  void SampleEdge() {
+    if (!CanSample()) return;
+    auto* view = web_contents()->GetRenderWidgetHostView();
+    if (!view || !view->IsSurfaceAvailableForCopy()) return;
+    const gfx::Size viewport = view->GetVisibleViewportSize();
+    if (viewport.width() < 80 || viewport.height() < 4) return;
+    // Exclude the vertical scrollbar and the first pixel of the surface.
+    const gfx::Rect strip(0, 2, viewport.width() - 16, 2);
+    copy_in_flight_ = true;
+    view->CopyFromSurfaceSecure(
+        strip, gfx::Size(kPageEdgeSamples, 1), base::Milliseconds(500),
+        base::BindPostTaskToCurrentDefault(base::BindOnce(
+            &PageChromeObserver::OnEdgeCopied, weak_factory_.GetWeakPtr(),
+            document_generation_, web_contents()->GetPrimaryPage().GetWeakPtr())));
+  }
+
+  void OnEdgeCopied(unsigned generation, base::WeakPtr<content::Page> page,
+                    const content::CopyFromSurfaceResult& result) {
+    copy_in_flight_ = false;
+    if (std::exchange(sample_pending_, false)) ScheduleSample();
+    if (!result || !CanSample() || generation != document_generation_ ||
+        page.get() != &web_contents()->GetPrimaryPage()) {
+      return;
+    }
+    auto color = UniformPageEdge(result->bitmap);
+    if (edge_color_ == color) return;
+    edge_color_ = color;
+    changed_.Run();
+  }
+
   base::RepeatingClosure changed_;
+  std::optional<SkColor> edge_color_;
+  base::OneShotTimer timer_;
+  bool sample_edge_ = false;
+  bool copy_in_flight_ = false;
+  bool sample_pending_ = false;
+  unsigned document_generation_ = 0;
+  base::WeakPtrFactory<PageChromeObserver> weak_factory_{this};
 };
 
 class SpaceNavigationView::ClearObserver final : public content::WebContentsObserver {
@@ -974,10 +1281,11 @@ void SpaceNavigationView::RefreshPageChrome() {
   page_chrome_refresh_pending_ = false;
   if (!model_ || !GetWidget()) return;
   auto* contents = model_->GetActiveWebContents();
-  page_chrome_observer_->Observe(contents);
+  const bool use_page_chrome = !browser_->GetProfile()->IsOffTheRecord() &&
+      GetNativeTheme()->preferred_contrast() != ui::NativeTheme::PreferredContrast::kMore;
+  page_chrome_observer_->SetActiveContents(contents, use_page_chrome);
   std::optional<SkColor> color;
-  if (contents && !browser_->GetProfile()->IsOffTheRecord() &&
-      GetNativeTheme()->preferred_contrast() != ui::NativeTheme::PreferredContrast::kMore) {
+  if (contents && use_page_chrome) {
     const auto& url = contents->GetLastCommittedURL();
     // Product preferences and the native settings document share their actual
     // canvas with the toolbar; other management pages retain upstream themes.
@@ -988,6 +1296,12 @@ void SpaceNavigationView::RefreshPageChrome() {
       if (background && SkColorGetA(*background) == SK_AlphaOPAQUE) color = background;
       if (auto theme = contents->GetThemeColor(); theme && SkColorGetA(*theme))
         color = color_utils::GetResultingPaintColor(*theme, color.value_or(SK_ColorWHITE));
+      // A distinct visible header extends into the toolbar. For pages whose
+      // edge is just the document canvas, respect the site's declared theme.
+      if (auto edge = page_chrome_observer_->edge_color();
+          edge && !SimilarColors(*edge, background.value_or(SK_ColorWHITE))) {
+        color = edge;
+      }
     }
   }
   const auto* space = workspace_->model().FindSpace(active_space_id_);
@@ -2166,39 +2480,43 @@ void SpaceNavigationView::RenderTab(views::BoxLayoutView* parent,
   auto* tab = handle.Get(); if (!tab) return;
   const bool active = model_->GetActiveTab() == tab;
   const bool dark = IsDark();
-  auto* row = Row(parent);
-  if (active) row->SetBackground(views::CreateRoundedRectBackground(
-      SkColorSetARGB(dark ? 45 : 180, 255, 255, 255), 8));
-  row->SetInsideBorderInsets(gfx::Insets::TLBR(0, depth * 12, 0, 8));
-  auto title = tab->GetContents()->GetTitle(); if (title.empty()) title = LocalizedText16(browser_->GetProfile(), "新标签页", "New Tab");
+  auto* profile = browser_->GetProfile();
+  auto title = tab->GetContents()->GetTitle();
+  if (title.empty()) title = LocalizedText16(profile, "新标签页", "New Tab");
   const auto found = bindings_.find(handle.raw_value());
-  if (found != bindings_.end() && !found->second.item_id.empty()) {
+  const bool saved = found != bindings_.end() && !found->second.item_id.empty();
+  if (saved) {
     if (const auto* item = workspace_->model().FindItem(found->second.item_id))
       title = base::UTF8ToUTF16(item->title);
   }
-  auto* button = row->AddChildView(std::make_unique<SidebarButton>(
+  views::Button::PressedCallback close;
+  std::u16string close_label;
+  if (interactive && !collapsed_) {
+    close = base::BindRepeating(&SpaceNavigationView::CloseTab,
+                                base::Unretained(this), handle);
+    close_label = saved
+        ? LocalizedText16(profile, "关闭标签页，保留固定链接", "Close tab, keep pinned")
+        : LocalizedText16(profile, "关闭标签页", "Close tab");
+  }
+  auto* row = parent->AddChildView(std::make_unique<TabRow>(
       base::BindRepeating([](SpaceNavigationView* self, tabs::TabHandle handle) {
         if (self->model_ && handle.Get() && self->model_->GetIndexOfTab(handle.Get()) != TabStripModel::kNoTab)
           self->model_->ActivateTab(handle.Get());
-      }, base::Unretained(this), handle), collapsed_ ? std::u16string() : title, false, dark));
-  row->SetFlexForView(button, 1, true);
-  button->SetTooltipText(title);
-  auto icon = ui::ImageModel::FromVectorIcon(kGlobeIcon, (IsDark() ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53)), 18);
+      }, base::Unretained(this), handle),
+      std::move(close), std::move(title), std::move(close_label), active,
+      dark, collapsed_, saved, depth));
+  auto* button = row->title_button();
+  auto icon = ui::ImageModel::FromVectorIcon(
+      kGlobeIcon, dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53), 18);
   if (auto* driver = favicon::ContentFaviconDriver::FromWebContents(tab->GetContents()); driver && driver->FaviconIsValid()) {
     auto favicon = driver->GetFavicon(); if (!favicon.IsEmpty()) icon = ui::ImageModel::FromImage(favicon);
   }
   button->SetImageModel(views::Button::STATE_NORMAL, icon);
   if (interactive) {
-    const bool saved = found != bindings_.end() && !found->second.item_id.empty();
     RegisterRow(button, saved ? found->second.item_id
                               : "@tab:" + base::NumberToString(handle.raw_value()),
                 saved ? Area::kSaved : Area::kTemporary);
     button->set_context_menu_controller(this);
-  }
-  if (active && !collapsed_) {
-    auto* close = row->AddChildView(IconButton(
-        base::BindRepeating(&SpaceNavigationView::CloseTab, base::Unretained(this), handle), kCloseIcon, dark, 14));
-    close->SetTooltipText(LocalizedText16(browser_->GetProfile(), "关闭页面", "Close tab")); close->SetPreferredSize(gfx::Size(22, 28));
   }
 }
 void SpaceNavigationView::RenderSaved(views::BoxLayoutView* parent,
@@ -2820,6 +3138,37 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     base::DictValue result; result.Set("check", std::move(name)); result.Set("passed", passed);
     checks.Append(std::move(result)); return passed;
   };
+  {
+    base::RepeatingClosure noop = base::DoNothing();
+    auto* row = AddChildView(std::make_unique<TabRow>(
+        noop, noop, u"Background page",
+        u"Close tab", false, false, false, false, 1));
+    row->SetSize(gfx::Size(200, 38));
+    row->DeprecatedLayoutImmediately();
+    const auto title_bounds = row->title_button()->bounds();
+    const auto row_size = row->GetPreferredSize();
+    const views::View* close = row->children().back();
+    const auto action_center = close->GetMirroredBounds().CenterPoint();
+    expect("background tab reserves a close slot with no idle close target",
+           !close->GetVisible() &&
+               row->GetEventHandlerForPoint(action_center) == row->title_button());
+    views::View& row_view = *row;
+    row_view.OnMouseEntered(ui::MouseEvent(
+        ui::EventType::kMouseEntered, action_center, action_center,
+        base::TimeTicks::Now(), 0, 0));
+    row->DeprecatedLayoutImmediately();
+    expect("hover reveals the background close target without shifting the title",
+           close->GetVisible() &&
+               row->GetEventHandlerForPoint(action_center) == close &&
+               row->title_button()->bounds() == title_bounds &&
+               row->GetPreferredSize() == row_size);
+    row_view.OnMouseExited(ui::MouseEvent(
+        ui::EventType::kMouseExited, action_center, action_center,
+        base::TimeTicks::Now(), 0, 0));
+    expect("close target disappears when the pointer leaves the whole row",
+           !close->GetVisible());
+    RemoveChildViewT(row);
+  }
   const auto internal_alias = CanonicalTaiInput(GURL("tai://settings/privacy?search=site#cookies"));
   expect("brand input alias retains the real Chromium settings origin and subpath", internal_alias && internal_alias->spec() == "chrome://settings/privacy?search=site#cookies");
   const auto preferences_alias = CanonicalTaiInput(GURL("tai://preferences/?space=example#shortcuts"));
@@ -3234,6 +3583,26 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
       edge_color() == SkColorSetRGB(23,59,54) &&
       edge_color(0x534244) == SkColorSetRGB(23,59,54));
   expect("page chrome does not change the renderer native color scheme", GetNativeTheme()->preferred_color_scheme() == native_scheme);
+  const GURL fixture_root(base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+      "sidebar-cookie-smoke-url"));
+  if (fixture_root.is_valid()) {
+    navigate(dark_page, fixture_root.Resolve("solid-header"));
+    expect("dark full-width header supplies the toolbar color above a white article",
+           wait_for([&] {
+             // Display-space readback quantizes to 8 bits before conversion
+             // to sRGB. Allow rounding, but check the native paint exactly.
+             return page_chrome_color_ &&
+                    SimilarColors(*page_chrome_color_, SkColorSetRGB(28, 25, 22), 4) &&
+                    edge_color() == page_chrome_color_ &&
+                    !color_utils::IsDark(browser_view->toolbar()->GetColorProvider()
+                                             ->GetColor(kColorToolbarButtonIcon));
+           }));
+    navigate(dark_page, fixture_root.Resolve("mixed-header"));
+    expect("mixed top edge falls back to the declared theme after navigation",
+           wait_for([&] {
+             return page_chrome_color_ == SkColorSetRGB(237, 232, 221);
+           }));
+  }
   navigate(dark_page, GURL("chrome://tai/home.html"));
   expect("TAi home canvas continues into the native toolbar", wait_for([&] {
     return page_chrome_color_ && page_chrome_color_ == dark_page.Get()->GetContents()->GetBackgroundColor();
