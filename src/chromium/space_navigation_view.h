@@ -39,7 +39,7 @@ class BrowserView;
 namespace gfx { class Canvas; }
 namespace ui { struct ColorProviderKey; class Layer; }
 namespace tabs { class VerticalTabStripStateController; }
-namespace views { class EventMonitor; class BubbleDialogDelegate; class Background; class LabelButton; class Textfield; class MenuRunner; }
+namespace views { class EventMonitor; class BubbleDialogDelegate; class Background; class LabelButton; class Textfield; class MenuRunner; class ScrollView; }
 namespace sidebar {
 std::unique_ptr<views::View> CreateSidebarToggle(BrowserWindowInterface*);
 std::unique_ptr<views::Background> CreateSidebarBackground(views::View&, BrowserView&);
@@ -177,6 +177,9 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void Refresh();
   void SyncTabs();
   void Render();
+  void ResetSpaceScrollContents();
+  float SpaceScrollOffset(const std::string& space_id) const;
+  void RestoreSpaceScrollAfterLayout(views::ScrollView* scroll);
   bool Swipe(float x, float y);
   void SwitchRelativeSpace(int delta);
   void ActivateSpace(std::string id);
@@ -223,13 +226,18 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   raw_ptr<TabStripModel> model_;
   raw_ptr<WorkspaceState> workspace_;
   raw_ptr<tabs::VerticalTabStripStateController> state_controller_;
+  raw_ptr<views::ScrollView> space_scroll_ = nullptr;
   raw_ptr<views::BoxLayoutView> body_ = nullptr;
   raw_ptr<views::BoxLayoutView> favorites_body_ = nullptr;
   raw_ptr<views::BoxLayoutView> title_clip_ = nullptr;
   raw_ptr<views::BoxLayoutView> space_body_ = nullptr;
-  raw_ptr<views::BoxLayoutView> swipe_preview_ = nullptr;
+  raw_ptr<views::View> swipe_preview_ = nullptr;
   raw_ptr<views::View> swipe_preview_title_ = nullptr;
   std::string swipe_preview_space_id_;
+  // This window's positions are discarded when the sidebar is destroyed.
+  std::map<std::string, float> space_scroll_offsets_;
+  std::string rendered_space_id_;
+  std::optional<float> pending_space_scroll_offset_;
   raw_ptr<views::BoxLayoutView> dock_ = nullptr;
   raw_ptr<views::Textfield> editor_ = nullptr;
   std::map<int32_t, TabOrganization> bindings_;
