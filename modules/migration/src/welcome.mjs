@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 import {lexer} from 'marked';
+import {decodeHTMLStrict} from 'entities/decode';
 import {parseArcSidebar} from './arc.mjs';
 import {parseBookmarksHTML, parseChromeBookmarks} from './chrome.mjs';
 
@@ -73,7 +74,9 @@ export function previewWelcomeImport(source, input, names) {
       if (depth > 64) throw new Error('IMPORT_NESTING_LIMIT');
       for (const token of tokens) {
         if (token.type === 'link') {
-          addLink(targetSpace(), plainText(token.tokens) || token.text, parent, token.href);
+          const title = token.autolink ? token.text : plainText(token.tokens) || token.text;
+          const href = token.autolink ? token.href : decodeHTMLStrict(token.href);
+          addLink(targetSpace(), title, parent, href);
         } else if (token.type === 'list') {
           for (const item of token.items) {
             const nested = item.tokens.filter(part => part.type === 'list');
@@ -158,5 +161,11 @@ function containsLink(token) {
 }
 
 function plainText(tokens = []) {
-  return tokens.map(token => token.tokens ? plainText(token.tokens) : (token.text ?? '')).join('').trim();
+  return tokens.map(token => {
+    // Decode leaf text once, leaving code, backslash escapes and autolinks literal.
+    if (token.autolink) return token.text;
+    if (token.tokens) return plainText(token.tokens);
+    const text = token.text ?? '';
+    return token.type === 'text' ? decodeHTMLStrict(text) : text;
+  }).join('').trim();
 }

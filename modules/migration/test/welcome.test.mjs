@@ -70,6 +70,50 @@ test('empty, invalid and oversized input cannot be committed', () => {
   assert.throws(() => previewWelcomeImport('arc', 'x'.repeat(maximumImportBytes + 1), names), /IMPORT_FILE_LIMIT/);
 });
 
+test('Arc Markdown decodes character references in names and link destinations once', () => {
+  const markdown = `# Work &amp; Research
+
+## Reading &#x1F4DA;
+
+- Notes &amp; links
+  - [A &amp; **B** &#38; C](https://example.test/?a=1&amp;b=2)
+  - [&amp;amp;](https://example.test/?a=1&amp;amp;b=2)
+`;
+  const result = previewWelcomeImport('arc', markdown, names);
+  assert.deepEqual(result.spaces, [{name: 'Work & Research', items: [
+    {title: 'Reading 📚', parent: -1},
+    {title: 'Notes & links', parent: 0},
+    {title: 'A & B & C', parent: 1, url: 'https://example.test/?a=1&b=2'},
+    {title: '&amp;', parent: 1, url: 'https://example.test/?a=1&amp;b=2'},
+  ]}]);
+  assert.equal(result.hasWarnings, false);
+});
+
+test('Arc Markdown keeps character references literal in code, escapes and autolinks', () => {
+  const markdown = '# Work\n\n' +
+    '- [`&amp;` and \\&amp; and &amp and &unknown;](https://example.test/)\n' +
+    '- <https://example.test/?a=1&amp;b=2>\n';
+  const result = previewWelcomeImport('arc', markdown, names);
+  assert.equal(result.spaces[0].items[0].title, '&amp; and &amp; and &amp and &unknown;');
+  assert.deepEqual(result.spaces[0].items[1], {
+    title: 'https://example.test/?a=1&amp;b=2', parent: -1,
+    url: 'https://example.test/?a=1&amp;b=2',
+  });
+});
+
+test('Arc Markdown validates decoded destinations and keeps decoded markup inert', () => {
+  const markdown = `# Work
+
+- [&lt;img src=x onerror=alert(1)&gt;](https://example.test/)
+- [Unsafe](javascript&#58;alert%281%29)
+- [Credentials](https://user&#58;pass&#64;example.test/)
+`;
+  const result = previewWelcomeImport('arc', markdown, names);
+  assert.equal(result.linkCount, 1);
+  assert.equal(result.hasWarnings, true);
+  assert.equal(result.spaces[0].items[0].title, '<img src=x onerror=alert(1)>');
+});
+
 test('an Arc export with over 1,500 links can be imported in one preview', () => {
   const sections = Array.from({length: 14}, (_, space) => {
     const links = Array.from({length: 140}, (_, link) =>
