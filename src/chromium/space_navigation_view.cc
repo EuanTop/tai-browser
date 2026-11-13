@@ -1118,7 +1118,6 @@ SpaceNavigationView::SpaceNavigationView(
   SetFlexForView(scrolling, 1);
   dock_ = Row(this, 1);
   dock_->SetInsideBorderInsets(gfx::Insets::TLBR(6, kDockLeftInset, 6, kDockRightInset));
-  AddPreTargetHandler(&swipe_handler_);
   collapsed_ = state_controller->IsCollapsed();
   collapse_subscription_ = state_controller->RegisterOnCollapseChanged(
       base::BindRepeating([](SpaceNavigationView* self,
@@ -1143,14 +1142,13 @@ SpaceNavigationView::SpaceNavigationView(
   }
 }
 SpaceNavigationView::~SpaceNavigationView() {
-  DetachRecentKeys();
+  DetachWindowInputHandlers();
 #if BUILDFLAG(IS_MAC)
   ForgetGlobalSearchWindow(browser_);
 #endif
   FinishSpaceTransition();
   paint_subscription_ = {};
   widget_observation_.Reset();
-  RemovePreTargetHandler(&swipe_handler_);
 }
 
 std::unique_ptr<views::View> CreateSidebarToggle(BrowserWindowInterface* browser) {
@@ -1357,8 +1355,12 @@ void SpaceNavigationView::ShowAppearance() {
 void SpaceNavigationView::AddedToWidget() {
   views::BoxLayoutView::AddedToWidget();
   widget_observation_.Observe(GetWidget());
-  GetWidget()->GetRootView()->AddPreTargetHandler(&recent_keys_);
-  recent_keys_attached_ = true;
+  auto* root = GetWidget()->GetRootView();
+  root->AddPreTargetHandler(&recent_keys_);
+  // The sidebar's viewport can extend below the last row. Observe the window
+  // before target dispatch, then route by the visible sidebar geometry.
+  root->AddPreTargetHandler(&swipe_handler_);
+  window_input_handlers_attached_ = true;
   paint_subscription_ = GetWidget()->RegisterPaintAsActiveChangedCallback(
       base::BindRepeating([](base::WeakPtr<SpaceNavigationView> self) {
         // Native action buttons update their icon on activation changes. Apply
@@ -1369,18 +1371,22 @@ void SpaceNavigationView::AddedToWidget() {
       }, weak_factory_.GetWeakPtr()));
 }
 void SpaceNavigationView::RemovedFromWidget() {
-  DetachRecentKeys();
+  DetachWindowInputHandlers();
   paint_subscription_ = {};
   widget_observation_.Reset(); views::BoxLayoutView::RemovedFromWidget();
 }
 void SpaceNavigationView::OnWidgetDestroying(views::Widget*) {
-  DetachRecentKeys();
+  DetachWindowInputHandlers();
   paint_subscription_ = {}; widget_observation_.Reset();
 }
-void SpaceNavigationView::DetachRecentKeys() {
-  if (!recent_keys_attached_) return;
-  GetWidget()->GetRootView()->RemovePreTargetHandler(&recent_keys_);
-  recent_keys_attached_ = false; EndRecentTabCycle();
+void SpaceNavigationView::DetachWindowInputHandlers() {
+  if (!window_input_handlers_attached_) return;
+  auto* root = GetWidget()->GetRootView();
+  root->RemovePreTargetHandler(&recent_keys_);
+  root->RemovePreTargetHandler(&swipe_handler_);
+  swipe_handler_.Reset();
+  window_input_handlers_attached_ = false;
+  EndRecentTabCycle();
 }
 void SpaceNavigationView::RecentKeys::OnEvent(const ui::Event& event) {
   if (owner_->GetWidget() && owner_->GetWidget()->IsActive())
@@ -2009,9 +2015,23 @@ SpaceNavigationView::SwipeHandler::SwipeHandler(SpaceNavigationView* owner)
 
 SpaceNavigationView::SwipeHandler::~SwipeHandler() = default;
 
+bool SpaceNavigationView::SwipeHandler::IsOverSidebar(
+    const ui::LocatedEvent& event) const {
+  auto* widget = owner_->GetWidget();
+  return widget && owner_->IsDrawn() &&
+         owner_->GetVisibleBounds().Contains(views::View::ConvertPointToTarget(
+             widget->GetRootView(), owner_, event.root_location()));
+}
+
 void SpaceNavigationView::SwipeHandler::OnScrollEvent(ui::ScrollEvent* event) {
+  if (!owner_->model_ || !owner_->workspace_->loaded() || CurrentDrag().source)
+    return;
+  const bool over_sidebar = IsOverSidebar(*event);
 #if BUILDFLAG(IS_MAC)
-  if (!owner_->workspace_->loaded() || CurrentDrag().source) return;
+  if (!owner_->IsDrawn()) {
+    Reset();
+    return;
+  }
   const auto scroll = event->scroll_event_phase();
   const auto momentum = event->momentum_phase();
   const bool began = scroll == ui::ScrollEventPhase::kBegan ||
@@ -2022,9 +2042,23 @@ void SpaceNavigationView::SwipeHandler::OnScrollEvent(ui::ScrollEvent* event) {
   if (began) {
     if (phase_ == Phase::kHorizontal) Complete(now);
     Reset();
+    if (!over_sidebar) phase_ = Phase::kOutside;
   } else if (phase_ == Phase::kMomentum) {
-    event->StopPropagation();
+    if (ended || momentum == ui::EventMomentumPhase::INERTIAL_UPDATE) {
+      event->StopPropagation();
+      if (ended) Reset();
+      return;
+    }
+    Reset();
+  }
+  if (phase_ == Phase::kOutside) {
     if (ended) Reset();
+    return;
+  }
+  // A latched horizontal swipe can finish outside the sidebar. A new swipe
+  // over the page must still reach the page, even after sidebar momentum.
+  if (!over_sidebar && phase_ != Phase::kHorizontal) {
+    Reset();
     return;
   }
   if (ended) {
@@ -2061,7 +2095,7 @@ void SpaceNavigationView::SwipeHandler::OnScrollEvent(ui::ScrollEvent* event) {
         self->Complete(base::TimeTicks::Now());
       }, base::Unretained(this)));
 #else
-  if (event->type() == ui::EventType::kScroll &&
+  if (over_sidebar && event->type() == ui::EventType::kScroll &&
       owner_->Swipe(event->x_offset(), event->y_offset())) event->SetHandled();
 #endif
 }
@@ -2088,7 +2122,8 @@ void SpaceNavigationView::SwipeHandler::Complete(base::TimeTicks release) {
   owner_->CompleteSpaceSwipe(offset, flick);
 }
 void SpaceNavigationView::SwipeHandler::OnMouseEvent(ui::MouseEvent* event) {
-  if (event->type() == ui::EventType::kMousewheel) {
+  if (owner_->model_ && !CurrentDrag().source &&
+      event->type() == ui::EventType::kMousewheel && IsOverSidebar(*event)) {
     auto* wheel = static_cast<ui::MouseWheelEvent*>(event);
     if (owner_->Swipe(wheel->x_offset(), wheel->y_offset())) event->SetHandled();
   }
@@ -3331,13 +3366,44 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
       return self(self, child);
     });
   };
+  auto* widget = GetWidget();
+  auto* root = widget->GetRootView();
+  auto* list = GetViewByID(0x534253);
+  gfx::Point blank = list->GetLocalBounds().bottom_center();
+  blank.Offset(0, -8);
+  blank = views::View::ConvertPointToTarget(list, root, blank);
+  const gfx::Point blank_in_rows =
+      views::View::ConvertPointToTarget(root, space_body_, blank);
+  expect("swipe fixture hits the blank list viewport below the temporary rows",
+         list->height() > 8 && blank_in_rows.y() >= space_body_->height() &&
+             !space_body_->Contains(root->GetEventHandlerForPoint(blank)));
+  gfx::Point origin = blank;
   const auto gesture_start = base::TimeTicks::Now();
   auto send_scroll = [&](float x, float y, ui::EventMomentumPhase phase, int ms) {
-    ui::ScrollEvent event(ui::EventType::kScroll, gfx::PointF(), gfx::PointF(),
+    ui::ScrollEvent event(ui::EventType::kScroll, gfx::PointF(origin), gfx::PointF(origin),
                           gesture_start + base::Milliseconds(ms), ui::EF_NONE,
                           x, y, x, y, 2, phase);
-    swipe_handler_.OnScrollEvent(&event);
+    widget->OnScrollEvent(&event);
   };
+  // Chromium dispatches these through the actual window and view targeter.
+  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, -60);
+  send_scroll(0, 85, ui::EventMomentumPhase::NONE, -50);
+  send_scroll(0, 0, ui::EventMomentumPhase::END, -45);
+  expect("vertical scroll over blank sidebar does not preview or switch a Space",
+         active_space_id_ == a && !swipe_preview_active_);
+  const auto sidebar_in_root = views::View::ConvertRectToTarget(
+      this, root, GetLocalBounds());
+  origin.SetPoint(sidebar_in_root.CenterPoint().x() < root->width() / 2
+                      ? sidebar_in_root.right() + 16
+                      : sidebar_in_root.x() - 16,
+                  blank.y());
+  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, -40);
+  send_scroll(-85, 0, ui::EventMomentumPhase::NONE, -30);
+  origin = blank;
+  send_scroll(-85, 0, ui::EventMomentumPhase::NONE, -25);
+  send_scroll(0, 0, ui::EventMomentumPhase::END, -20);
+  expect("a swipe beginning over the page stays with the page across the sidebar",
+         active_space_id_ == a && !swipe_preview_active_);
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 0);
   send_scroll(-21, 0, ui::EventMomentumPhase::NONE, 10);
   const auto* dragged = space_body_->layer();
@@ -3386,6 +3452,14 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   send_scroll(-150, 0, ui::EventMomentumPhase::INERTIAL_UPDATE, 100);
   send_scroll(0, 0, ui::EventMomentumPhase::END, 130);
   expect("trackpad momentum cannot switch again", active_space_id_ == b);
+  FinishSpaceTransition();
+  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 160);
+  send_scroll(85, 0, ui::EventMomentumPhase::NONE, 170);
+  expect("right swipe over blank sidebar waits for lift", active_space_id_ == b);
+  send_scroll(0, 0, ui::EventMomentumPhase::END, 185);
+  Refresh();
+  expect("right swipe over blank sidebar returns to the previous Space",
+         active_space_id_ == a);
   FinishSpaceTransition();
   ws.RemoveItem(preview_pin);
   ActivateSpace(a);

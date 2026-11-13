@@ -120,8 +120,8 @@ class SpaceNavigationView final : public views::BoxLayoutView,
    private: raw_ptr<SpaceNavigationView> owner_;
   };
   RecentKeys recent_keys_{this};
-  bool recent_keys_attached_ = false;
-  void DetachRecentKeys();
+  bool window_input_handlers_attached_ = false;
+  void DetachWindowInputHandlers();
   base::OneShotTimer resize_refresh_timer_;
   class SwipeHandler final : public ui::EventHandler {
    public:
@@ -129,9 +129,10 @@ class SpaceNavigationView final : public views::BoxLayoutView,
     ~SwipeHandler() override;
     void OnScrollEvent(ui::ScrollEvent*) override;
     void OnMouseEvent(ui::MouseEvent*) override;
-   private:
-    enum class Phase { kIdle, kTracking, kHorizontal, kVertical, kMomentum };
     void Reset();
+   private:
+    enum class Phase { kIdle, kTracking, kHorizontal, kVertical, kMomentum, kOutside };
+    bool IsOverSidebar(const ui::LocatedEvent&) const;
     void Complete(base::TimeTicks release);
     raw_ptr<SpaceNavigationView> owner_;
     Phase phase_ = Phase::kIdle;
