@@ -110,6 +110,7 @@
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "third_party/skia/include/core/SkBitmap.h"
+#include "third_party/skia/include/core/SkColorSpace.h"
 #include "ui/views/paint_info.h"
 #include "base/strings/escape.h"
 #include "sidebar_browser/workspace_state.h"
@@ -903,10 +904,18 @@ std::optional<SkColor> UniformPageEdge(const SkBitmap& bitmap) {
       bitmap.height() != 1) {
     return std::nullopt;
   }
+  // The compositor can return display-space pixels. The browser palette
+  // consumes sRGB, so convert before comparing with the document color.
+  SkBitmap srgb;
+  const auto info = SkImageInfo::MakeN32(
+      kPageEdgeSamples, 1, kUnpremul_SkAlphaType, SkColorSpace::MakeSRGB());
+  srgb.allocPixels(info);
+  if (!bitmap.readPixels(info, srgb.getPixels(), srgb.rowBytes(), 0, 0))
+    return std::nullopt;
   std::array<SkColor, kPageEdgeSamples> pixels;
   std::array<uint8_t, kPageEdgeSamples> red, green, blue;
   for (int x = 0; x < kPageEdgeSamples; ++x) {
-    const SkColor pixel = bitmap.getColor(x, 0);
+    const SkColor pixel = srgb.getColor(x, 0);
     if (SkColorGetA(pixel) != SK_AlphaOPAQUE) return std::nullopt;
     pixels[x] = pixel;
     red[x] = SkColorGetR(pixel);
