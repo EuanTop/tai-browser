@@ -71,20 +71,26 @@ test('empty, invalid and oversized input cannot be committed', () => {
 });
 
 test('Arc Markdown decodes character references in names and link destinations once', () => {
-  const markdown = `# Work &amp; Research
+  const markdown = String.raw`# Work &amp; Research
 
 ## Reading &#x1F4DA;
 
 - Notes &amp; links
   - [A &amp; **B** &#38; C](https://example.test/?a=1&amp;b=2)
-  - [&amp;amp;](https://example.test/?a=1&amp;amp;b=2)
+  - [&amp;amp; and &#38;amp;](https://example.test/?a=1&amp;amp;b=2)
+  - [Escaped inline](<https://example.test/?a=1\&amp;b=2&amp;c=3>)
+  - [Escaped reference][literal]
+
+[literal]: https://example.test/?a=1\&amp;b=2&amp;c=3
 `;
   const result = previewWelcomeImport('arc', markdown, names);
   assert.deepEqual(result.spaces, [{name: 'Work & Research', items: [
     {title: 'Reading 📚', parent: -1},
     {title: 'Notes & links', parent: 0},
     {title: 'A & B & C', parent: 1, url: 'https://example.test/?a=1&b=2'},
-    {title: '&amp;', parent: 1, url: 'https://example.test/?a=1&amp;b=2'},
+    {title: '&amp; and &amp;', parent: 1, url: 'https://example.test/?a=1&amp;b=2'},
+    {title: 'Escaped inline', parent: 1, url: 'https://example.test/?a=1&amp;b=2&c=3'},
+    {title: 'Escaped reference', parent: 1, url: 'https://example.test/?a=1&amp;b=2&c=3'},
   ]}]);
   assert.equal(result.hasWarnings, false);
 });

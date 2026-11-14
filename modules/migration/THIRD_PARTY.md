@@ -48,9 +48,11 @@ above) via `decodeHTMLStrict`. This version was already pinned in the
 Semicolon-terminated references in text and explicit link destinations are
 decoded once without rendering HTML. Code, escaped text and autolinks stay
 literal, and decoded destinations still pass the existing HTTP(S)/credential
-checks. Synthetic welcome-import tests cover names, query parameters, literal
-references and rejected destinations. Native welcome-dialog validation remains
-a separate check.
+checks. The existing Marked **18.1.1** tokenizer and grammar identify the raw
+inline and reference destinations so escaped ampersands keep their meaning
+during decoding. Synthetic welcome-import tests cover names, query parameters,
+literal references and rejected destinations. Native welcome-dialog validation
+remains a separate check.
 
 ## Assessed, not copied
 
