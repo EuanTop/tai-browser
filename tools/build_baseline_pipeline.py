@@ -1,22 +1,43 @@
 #!/usr/bin/env python3
 """Continue the current successful sync through hooks, GN, and baseline build."""
-import datetime
 import argparse
+import datetime
 import fcntl
 import json
 import os
-from pathlib import Path
-from workspace_paths import CHROMIUM_LOCK, require_integration_checkout
+import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
+from workspace_paths import CHROMIUM_LOCK, ROOT, WORKSPACE, require_integration_checkout
 
-from workspace_paths import ROOT, WORKSPACE
 LOCAL = ROOT / 'research/local'
 
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def process_alive(pid) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def read_receipt(path) -> dict | None:
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+    except FileNotFoundError:
+        raise
 
 
 def main():
@@ -41,8 +62,6 @@ def main():
     save()
     try:
         deadline = time.monotonic() + 4 * 60 * 60
-        # A sync's initial validation can precede its receipt update. Wait for
-        # the owner to release the same lock before selecting its final receipt.
         with CHROMIUM_LOCK.open('a') as preparation_lock:
             while True:
                 try:
@@ -52,21 +71,19 @@ def main():
                     if time.monotonic() > deadline:
                         raise RuntimeError('Current Chromium preparation exceeded the waiting deadline')
                     time.sleep(2)
-            sync = json.loads(receipt.read_text())
+            sync = read_receipt(receipt)
         identity = (sync.get('started_at'), sync.get('pid'))
         if sync.get('revision') != lock['revision']:
             raise RuntimeError('The current sync belongs to a different baseline')
         state['sync_started_at'] = sync.get('started_at')
         save()
         while True:
-            # The prep process writes a small receipt in place; tolerate only
-            # a transient partial write while it is alive.
-            try:
-                sync = json.loads(receipt.read_text())
-            except json.JSONDecodeError:
+            sync = read_receipt(receipt)
+            if sync is None:
                 if time.monotonic() > deadline:
                     raise RuntimeError('Dependency sync receipt remained incomplete')
-                os.kill(identity[1], 0)
+                if not process_alive(identity[1]):
+                    raise RuntimeError('Sync process stopped without a completion receipt')
                 time.sleep(1)
                 continue
             if (sync.get('started_at'), sync.get('pid')) != identity:
@@ -77,25 +94,22 @@ def main():
                 raise RuntimeError('Dependency sync failed; inspect chromium-sync.log')
             if time.monotonic() > deadline:
                 raise RuntimeError('Waiting for dependency sync exceeded four hours')
-            try:
-                os.kill(sync['pid'], 0)
-            except ProcessLookupError:
+            if not process_alive(sync['pid']):
                 raise RuntimeError('Sync process stopped without a completion receipt')
             time.sleep(10)
         if args.wait_for_metal:
             state['phase'] = 'waiting_for_metal_toolchain'
             save()
             component_path = LOCAL / 'metal-component-install.json'
-            component = json.loads(component_path.read_text())
+            component = read_receipt(component_path)
             component_identity = component['started_at']
             component_deadline = time.monotonic() + 2 * 60 * 60
             while component.get('status') == 'running':
                 if time.monotonic() > component_deadline:
                     raise RuntimeError('Metal component download exceeded two hours')
                 time.sleep(5)
-                try:
-                    component = json.loads(component_path.read_text())
-                except json.JSONDecodeError:
+                component = read_receipt(component_path)
+                if component is None:
                     continue
                 if component.get('started_at') != component_identity:
                     raise RuntimeError('Metal component download identity changed')
@@ -126,7 +140,7 @@ def main():
         stages = ('bootstrap', 'hooks', 'gen', 'build')
         if args.resume_build:
             for previous in ('hooks', 'gen'):
-                confirmation = json.loads((LOCAL / f'chromium-{previous}.json').read_text())
+                confirmation = read_receipt(LOCAL / f'chromium-{previous}.json')
                 if confirmation.get('status') != 'completed' or confirmation.get('observed_revision') != lock['revision']:
                     raise RuntimeError('Cannot resume before successful hooks and GN for this baseline')
             stages = ('bootstrap', 'build')
@@ -145,17 +159,22 @@ def main():
         if not binary.is_file():
             raise RuntimeError('Build returned success but the expected browser is missing')
         state.update(status='completed', phase='built', binary=str(binary))
-    except Exception as error:
+    except (Exception, KeyboardInterrupt) as error:
         state.update(status='failed', error=str(error))
     state['finished_at'] = now()
     save()
     return 0 if state['status'] == 'completed' else 1
 
 
+def handler(signum, frame):
+    raise KeyboardInterrupt
+
+
 if __name__ == '__main__':
     require_integration_checkout()
     CHROMIUM_LOCK.parent.mkdir(parents=True, exist_ok=True)
     LOCAL.mkdir(parents=True, exist_ok=True)
+    signal.signal(signal.SIGTERM, handler)
     with (LOCAL / 'baseline-pipeline.lock').open('a') as pipeline_lock:
         try:
             fcntl.flock(pipeline_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
