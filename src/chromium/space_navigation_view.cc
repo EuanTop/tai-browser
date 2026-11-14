@@ -1106,19 +1106,14 @@ SpaceNavigationView::SpaceNavigationView(
   scroll->SetBackgroundColor(std::nullopt);
   scroll->SetDrawOverflowIndicator(false);
   scroll->SetHorizontalScrollBarMode(views::ScrollView::ScrollBarMode::kDisabled);
-  body_ = scroll->SetContents(std::make_unique<views::BoxLayoutView>());
-  body_->SetPaintToLayer();
-  body_->layer()->SetFillsBoundsOpaquely(false);
-  body_->layer()->SetMasksToBounds(true);
-  body_->SetOrientation(views::BoxLayout::Orientation::kVertical);
-  body_->SetCrossAxisAlignment(views::BoxLayout::CrossAxisAlignment::kStretch);
-  body_->SetBetweenChildSpacing(3);
-  body_->SetInsideBorderInsets(gfx::Insets::TLBR(0, 8, 12, 8));
-  auto* scrolling = AddChildView(std::move(scroll));
-  SetFlexForView(scrolling, 1);
+  scroll->RegisterPostLayoutCallback(base::BindRepeating(
+      &SpaceNavigationView::RestoreSpaceScrollAfterLayout,
+      base::Unretained(this)));
+  space_scroll_ = AddChildView(std::move(scroll));
+  ResetSpaceScrollContents();
+  SetFlexForView(space_scroll_, 1);
   dock_ = Row(this, 1);
   dock_->SetInsideBorderInsets(gfx::Insets::TLBR(6, kDockLeftInset, 6, kDockRightInset));
-  AddPreTargetHandler(&swipe_handler_);
   collapsed_ = state_controller->IsCollapsed();
   collapse_subscription_ = state_controller->RegisterOnCollapseChanged(
       base::BindRepeating([](SpaceNavigationView* self,
@@ -1143,14 +1138,13 @@ SpaceNavigationView::SpaceNavigationView(
   }
 }
 SpaceNavigationView::~SpaceNavigationView() {
-  DetachRecentKeys();
+  DetachWindowInputHandlers();
 #if BUILDFLAG(IS_MAC)
   ForgetGlobalSearchWindow(browser_);
 #endif
   FinishSpaceTransition();
   paint_subscription_ = {};
   widget_observation_.Reset();
-  RemovePreTargetHandler(&swipe_handler_);
 }
 
 std::unique_ptr<views::View> CreateSidebarToggle(BrowserWindowInterface* browser) {
@@ -1357,8 +1351,12 @@ void SpaceNavigationView::ShowAppearance() {
 void SpaceNavigationView::AddedToWidget() {
   views::BoxLayoutView::AddedToWidget();
   widget_observation_.Observe(GetWidget());
-  GetWidget()->GetRootView()->AddPreTargetHandler(&recent_keys_);
-  recent_keys_attached_ = true;
+  auto* root = GetWidget()->GetRootView();
+  root->AddPreTargetHandler(&recent_keys_);
+  // The sidebar's viewport can extend below the last row. Observe the window
+  // before target dispatch, then route by the visible sidebar geometry.
+  root->AddPreTargetHandler(&swipe_handler_);
+  window_input_handlers_attached_ = true;
   paint_subscription_ = GetWidget()->RegisterPaintAsActiveChangedCallback(
       base::BindRepeating([](base::WeakPtr<SpaceNavigationView> self) {
         // Native action buttons update their icon on activation changes. Apply
@@ -1369,18 +1367,22 @@ void SpaceNavigationView::AddedToWidget() {
       }, weak_factory_.GetWeakPtr()));
 }
 void SpaceNavigationView::RemovedFromWidget() {
-  DetachRecentKeys();
+  DetachWindowInputHandlers();
   paint_subscription_ = {};
   widget_observation_.Reset(); views::BoxLayoutView::RemovedFromWidget();
 }
 void SpaceNavigationView::OnWidgetDestroying(views::Widget*) {
-  DetachRecentKeys();
+  DetachWindowInputHandlers();
   paint_subscription_ = {}; widget_observation_.Reset();
 }
-void SpaceNavigationView::DetachRecentKeys() {
-  if (!recent_keys_attached_) return;
-  GetWidget()->GetRootView()->RemovePreTargetHandler(&recent_keys_);
-  recent_keys_attached_ = false; EndRecentTabCycle();
+void SpaceNavigationView::DetachWindowInputHandlers() {
+  if (!window_input_handlers_attached_) return;
+  auto* root = GetWidget()->GetRootView();
+  root->RemovePreTargetHandler(&recent_keys_);
+  root->RemovePreTargetHandler(&swipe_handler_);
+  swipe_handler_.Reset();
+  window_input_handlers_attached_ = false;
+  EndRecentTabCycle();
 }
 void SpaceNavigationView::RecentKeys::OnEvent(const ui::Event& event) {
   if (owner_->GetWidget() && owner_->GetWidget()->IsActive())
@@ -1854,10 +1856,10 @@ void SpaceNavigationView::PreviewSpaceSwipe(float offset) {
     FinishSpaceTransition();
     swipe_preview_active_ = true;
   }
-  const float width = space_body_->width();
+  const int width = space_body_->width();
   const bool has_neighbour = workspace_->model().spaces().size() > 1;
   const float shift = has_neighbour
-      ? std::clamp(offset, -width, width)
+      ? std::clamp(offset, -static_cast<float>(width), static_cast<float>(width))
       : std::copysign(kSwipeEdgeGive * -std::expm1(-std::abs(offset) / kSwipeEdgeGive), offset);
   gfx::Transform transform;
   transform.Translate(shift, 0);
@@ -1878,20 +1880,32 @@ void SpaceNavigationView::PreviewSpaceSwipe(float offset) {
   if (swipe_preview_space_id_ != adjacent) {
     RemoveSwipePreview();
     auto* viewport = body_->parent();
-    auto* scroll = static_cast<views::ScrollView*>(viewport->parent());
-    const auto visible = scroll->GetVisibleRect();
-    const int top = std::max(0, space_body_->y() - visible.y());
-    const int height = visible.height() - top;
-    if (adjacent.empty() || height <= 0) return;
-    // The preview occupies the exposed part of the existing scroll viewport.
-    // Rows below the viewport are built by the regular layout after commit.
-    auto preview = BuildSpaceBody(adjacent, false, height / 30 + 2);
+    const auto visible = space_scroll_->GetVisibleRect();
+    if (adjacent.empty() || visible.IsEmpty()) return;
+    const float saved_offset = SpaceScrollOffset(adjacent);
+    // Build enough of the destination list to reach its remembered viewport.
+    // The estimate uses less than the minimum height of a saved or tab row.
+    const int row_budget = static_cast<int>(saved_offset / 30) +
+                           visible.height() / 30 + 3;
+    auto rows = BuildSpaceBody(adjacent, false, row_budget);
+    const int rows_height = rows->GetHeightForWidth(width);
+    const auto insets = body_->GetInsideBorderInsets();
+    const int max_offset =
+        std::max(0, rows_height + insets.height() - visible.height());
+    const float y = insets.top() -
+                    std::min(saved_offset, static_cast<float>(max_offset));
+    const int layout_y = std::lround(y);
+    rows->SetBounds(0, layout_y, width, rows_height);
+    rows->layer()->SetTransform(gfx::Transform::MakeTranslation(0, y - layout_y));
+    auto preview = std::make_unique<views::View>();
     preview->SetCanProcessEventsWithinSubtree(false);
     preview->GetViewAccessibility().SetIsLeaf(true);
     preview->GetViewAccessibility().SetIsIgnored(true);
+    preview->SetPaintToLayer();
+    preview->layer()->SetFillsBoundsOpaquely(false);
     preview->layer()->SetMasksToBounds(true);
-    preview->SetBounds(space_body_->x() - visible.x(), top,
-                       space_body_->width(), height);
+    preview->SetBounds(space_body_->x() - visible.x(), 0, width, visible.height());
+    preview->AddChildView(std::move(rows));
     swipe_preview_ = viewport->AddChildView(std::move(preview));
     swipe_preview_->DeprecatedLayoutImmediately();
     auto title = BuildSpaceHeader(adjacent, false);
@@ -2009,9 +2023,23 @@ SpaceNavigationView::SwipeHandler::SwipeHandler(SpaceNavigationView* owner)
 
 SpaceNavigationView::SwipeHandler::~SwipeHandler() = default;
 
+bool SpaceNavigationView::SwipeHandler::IsOverSidebar(
+    const ui::LocatedEvent& event) const {
+  auto* widget = owner_->GetWidget();
+  return widget && owner_->IsDrawn() &&
+         owner_->GetVisibleBounds().Contains(views::View::ConvertPointToTarget(
+             widget->GetRootView(), owner_, event.root_location()));
+}
+
 void SpaceNavigationView::SwipeHandler::OnScrollEvent(ui::ScrollEvent* event) {
+  if (!owner_->model_ || !owner_->workspace_->loaded() || CurrentDrag().source)
+    return;
+  const bool over_sidebar = IsOverSidebar(*event);
 #if BUILDFLAG(IS_MAC)
-  if (!owner_->workspace_->loaded() || CurrentDrag().source) return;
+  if (!owner_->IsDrawn()) {
+    Reset();
+    return;
+  }
   const auto scroll = event->scroll_event_phase();
   const auto momentum = event->momentum_phase();
   const bool began = scroll == ui::ScrollEventPhase::kBegan ||
@@ -2022,9 +2050,23 @@ void SpaceNavigationView::SwipeHandler::OnScrollEvent(ui::ScrollEvent* event) {
   if (began) {
     if (phase_ == Phase::kHorizontal) Complete(now);
     Reset();
+    if (!over_sidebar) phase_ = Phase::kOutside;
   } else if (phase_ == Phase::kMomentum) {
-    event->StopPropagation();
+    if (ended || momentum == ui::EventMomentumPhase::INERTIAL_UPDATE) {
+      event->StopPropagation();
+      if (ended) Reset();
+      return;
+    }
+    Reset();
+  }
+  if (phase_ == Phase::kOutside) {
     if (ended) Reset();
+    return;
+  }
+  // A latched horizontal swipe can finish outside the sidebar. A new swipe
+  // over the page must still reach the page, even after sidebar momentum.
+  if (!over_sidebar && phase_ != Phase::kHorizontal) {
+    Reset();
     return;
   }
   if (ended) {
@@ -2061,7 +2103,7 @@ void SpaceNavigationView::SwipeHandler::OnScrollEvent(ui::ScrollEvent* event) {
         self->Complete(base::TimeTicks::Now());
       }, base::Unretained(this)));
 #else
-  if (event->type() == ui::EventType::kScroll &&
+  if (over_sidebar && event->type() == ui::EventType::kScroll &&
       owner_->Swipe(event->x_offset(), event->y_offset())) event->SetHandled();
 #endif
 }
@@ -2088,7 +2130,13 @@ void SpaceNavigationView::SwipeHandler::Complete(base::TimeTicks release) {
   owner_->CompleteSpaceSwipe(offset, flick);
 }
 void SpaceNavigationView::SwipeHandler::OnMouseEvent(ui::MouseEvent* event) {
-  if (event->type() == ui::EventType::kMousewheel) {
+#if BUILDFLAG(IS_MAC)
+  // Views can redispatch an unconsumed trackpad update as a wheel event.
+  // Keep that fallback from bypassing the trackpad's direction and origin.
+  if (phase_ != Phase::kIdle) return;
+#endif
+  if (owner_->model_ && !CurrentDrag().source &&
+      event->type() == ui::EventType::kMousewheel && IsOverSidebar(*event)) {
     auto* wheel = static_cast<ui::MouseWheelEvent*>(event);
     if (owner_->Swipe(wheel->x_offset(), wheel->y_offset())) event->SetHandled();
   }
@@ -2712,9 +2760,46 @@ std::unique_ptr<views::BoxLayoutView> SpaceNavigationView::BuildSpaceBody(
   }
   return space_body;
 }
+float SpaceNavigationView::SpaceScrollOffset(const std::string& space_id) const {
+  const auto it = space_scroll_offsets_.find(space_id);
+  return it == space_scroll_offsets_.end() ? 0.f : it->second;
+}
+void SpaceNavigationView::ResetSpaceScrollContents() {
+  body_ = nullptr;
+  body_ = space_scroll_->SetContents(std::make_unique<views::BoxLayoutView>());
+  if (!body_->layer()) body_->SetPaintToLayer();
+  body_->layer()->SetFillsBoundsOpaquely(false);
+  body_->layer()->SetMasksToBounds(true);
+  body_->SetOrientation(views::BoxLayout::Orientation::kVertical);
+  body_->SetCrossAxisAlignment(views::BoxLayout::CrossAxisAlignment::kStretch);
+  body_->SetBetweenChildSpacing(3);
+  body_->SetInsideBorderInsets(gfx::Insets::TLBR(0, 8, 12, 8));
+}
+void SpaceNavigationView::RestoreSpaceScrollAfterLayout(views::ScrollView* scroll) {
+  if (!pending_space_scroll_offset_ || !GetVisible())
+    return;
+  const auto visible = scroll->GetVisibleRect();
+  if (visible.IsEmpty())
+    return;
+  const float max_offset = std::max(0, body_->height() - visible.height());
+  const float offset = std::clamp(*pending_space_scroll_offset_, 0.f, max_offset);
+  pending_space_scroll_offset_.reset();
+  if (scroll->CurrentOffset().y() != offset)
+    scroll->ScrollToOffset(gfx::PointF(0, offset));
+}
 void SpaceNavigationView::Render() {
   if (!workspace_->loaded() || !model_) return;
   TRACE_EVENT("browser", "TAi.RenderSidebar");
+  const auto visible_offset = space_scroll_->CurrentOffset();
+  const bool new_space = rendered_space_id_ != active_space_id_;
+  if (new_space && !rendered_space_id_.empty() && !pending_space_scroll_offset_ &&
+      GetVisible() && !space_scroll_->GetVisibleRect().IsEmpty()) {
+    if (visible_offset.y() > 0.f && workspace_->model().FindSpace(rendered_space_id_)) {
+      space_scroll_offsets_[rendered_space_id_] = visible_offset.y();
+    } else {
+      space_scroll_offsets_.erase(rendered_space_id_);
+    }
+  }
   const bool switching_space = transition_direction_ != 0;
   const base::ElapsedTimer elapsed;
   std::optional<float> swipe_entrance;
@@ -2728,11 +2813,17 @@ void SpaceNavigationView::Render() {
     outgoing_space_layer_.reset();
     outgoing_title_layer_.reset();
     // Keep the already painted outgoing compositor layer alive as the
-    // outgoing View tree is replaced. Its bounds share the scroll clip.
+    // outgoing View tree is replaced. Anchor it to the viewport so the
+    // incoming Space's offset cannot move the snapshot vertically.
     if (CanAnimateSpace() && space_body_->layer()->parent() &&
-        !space_body_->bounds().IsEmpty()) {
+        body_->parent()->layer() && !space_body_->bounds().IsEmpty()) {
       space_body_->layer()->GetAnimator()->StopAnimating();
       outgoing_space_layer_ = space_body_->RecreateLayer();
+      auto bounds = outgoing_space_layer_->bounds();
+      bounds.Offset(-std::lround(visible_offset.x()),
+                    -std::lround(visible_offset.y()));
+      outgoing_space_layer_->SetBounds(bounds);
+      body_->parent()->layer()->Add(outgoing_space_layer_.get());
     }
     if (transition_from_swipe_ && CanAnimateSpace() && space_header_ &&
         space_header_->layer()->parent() && !space_header_->bounds().IsEmpty()) {
@@ -2750,7 +2841,15 @@ void SpaceNavigationView::Render() {
   folder_reveal_ = nullptr;
   folder_rows_.clear();
   refresh_after_folder_reveal_ = false;
-  body_->RemoveAllChildViews();
+  if (new_space) {
+    // Give each newly shown Space a fresh scroll layer. Deltas or bounds from
+    // the old compositor layer then cannot overwrite the restored position.
+    rendered_space_id_ = active_space_id_;
+    pending_space_scroll_offset_ = SpaceScrollOffset(rendered_space_id_);
+    ResetSpaceScrollContents();
+  } else {
+    body_->RemoveAllChildViews();
+  }
   favorites_body_->RemoveAllChildViews();
   title_clip_->RemoveAllChildViews();
   dock_->RemoveAllChildViews();
@@ -2849,6 +2948,7 @@ void SpaceNavigationView::Render() {
         base::BindRepeating(&SpaceNavigationView::CreateSpace, base::Unretained(this)), kAddIcon, dark, 18));
     create->SetPreferredSize(gfx::Size(28, 28)); create->SetTooltipText(LocalizedText16(browser_->GetProfile(), "新建 Space", "New Space"));
   }
+  space_scroll_->InvalidateLayout();
   InvalidateLayout();
   PlaySpaceTransition(swipe_entrance);
   if (switching_space || elapsed.Elapsed() >= base::Milliseconds(50)) {
@@ -3331,13 +3431,44 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
       return self(self, child);
     });
   };
+  auto* widget = GetWidget();
+  auto* root = widget->GetRootView();
+  auto* list = GetViewByID(0x534253);
+  gfx::Point blank = list->GetLocalBounds().bottom_center();
+  blank.Offset(0, -8);
+  blank = views::View::ConvertPointToTarget(list, root, blank);
+  const gfx::Point blank_in_rows =
+      views::View::ConvertPointToTarget(root, space_body_, blank);
+  expect("swipe fixture hits the blank list viewport below the temporary rows",
+         list->height() > 8 && blank_in_rows.y() >= space_body_->height() &&
+             !space_body_->Contains(root->GetEventHandlerForPoint(blank)));
+  gfx::Point origin = blank;
   const auto gesture_start = base::TimeTicks::Now();
   auto send_scroll = [&](float x, float y, ui::EventMomentumPhase phase, int ms) {
-    ui::ScrollEvent event(ui::EventType::kScroll, gfx::PointF(), gfx::PointF(),
+    ui::ScrollEvent event(ui::EventType::kScroll, gfx::PointF(origin), gfx::PointF(origin),
                           gesture_start + base::Milliseconds(ms), ui::EF_NONE,
                           x, y, x, y, 2, phase);
-    swipe_handler_.OnScrollEvent(&event);
+    widget->OnScrollEvent(&event);
   };
+  // Chromium dispatches these through the actual window and view targeter.
+  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, -60);
+  send_scroll(0, 85, ui::EventMomentumPhase::NONE, -50);
+  send_scroll(0, 0, ui::EventMomentumPhase::END, -45);
+  expect("vertical scroll over blank sidebar does not preview or switch a Space",
+         active_space_id_ == a && !swipe_preview_active_);
+  const auto sidebar_in_root = views::View::ConvertRectToTarget(
+      this, root, GetLocalBounds());
+  origin.SetPoint(sidebar_in_root.CenterPoint().x() < root->width() / 2
+                      ? sidebar_in_root.right() + 16
+                      : sidebar_in_root.x() - 16,
+                  blank.y());
+  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, -40);
+  send_scroll(-85, 0, ui::EventMomentumPhase::NONE, -30);
+  origin = blank;
+  send_scroll(-85, 0, ui::EventMomentumPhase::NONE, -25);
+  send_scroll(0, 0, ui::EventMomentumPhase::END, -20);
+  expect("a swipe beginning over the page stays with the page across the sidebar",
+         active_space_id_ == a && !swipe_preview_active_);
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 0);
   send_scroll(-21, 0, ui::EventMomentumPhase::NONE, 10);
   const auto* dragged = space_body_->layer();
@@ -3387,10 +3518,106 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   send_scroll(0, 0, ui::EventMomentumPhase::END, 130);
   expect("trackpad momentum cannot switch again", active_space_id_ == b);
   FinishSpaceTransition();
+  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 160);
+  send_scroll(85, 0, ui::EventMomentumPhase::NONE, 170);
+  expect("right swipe over blank sidebar waits for lift", active_space_id_ == b);
+  send_scroll(0, 0, ui::EventMomentumPhase::END, 185);
+  Refresh();
+  expect("right swipe over blank sidebar returns to the previous Space",
+         active_space_id_ == a);
+  FinishSpaceTransition();
   ws.RemoveItem(preview_pin);
-  ActivateSpace(a);
+
+  // Give both Spaces distinct scroll positions past the first viewport.
+  std::vector<std::string> scroll_items;
+  for (const auto& space : {a, b}) {
+    for (int i = 0; i < 64; ++i) {
+      scroll_items.push_back(NewId());
+      ws.AddItem({scroll_items.back(), space, {},
+                  "Scroll row " + base::NumberToString(i),
+                  "https://example.invalid/scroll", SavedKind::kPage});
+    }
+  }
+  auto show_space = [&](const std::string& space) {
+    ActivateSpace(space);
+    Refresh();
+    widget->LayoutRootViewIfNecessary();
+    FinishSpaceTransition();
+  };
+  show_space(a);
+  const int first_offset = 875;
+  const int second_offset = 1150;
+  const auto current_offset = [&] { return space_scroll_->CurrentOffset().y(); };
+  const auto wait_for_offset = [&](int offset, bool scroll = false) {
+    const auto deadline = base::TimeTicks::Now() + base::Seconds(2);
+    do {
+      if (scroll) space_scroll_->ScrollToOffset(gfx::PointF(0, offset));
+      if (std::abs(current_offset() - offset) < 0.01f) return true;
+      base::RunLoop loop(base::RunLoop::Type::kNestableTasksAllowed);
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+          FROM_HERE, loop.QuitClosure(), base::Milliseconds(16));
+      loop.Run();
+    } while (base::TimeTicks::Now() < deadline);
+    VLOG(1) << "TAi smoke scroll target=" << offset
+            << " actual=" << current_offset() << " scrolled=" << scroll
+            << " max=" << space_scroll_->vertical_scroll_bar()->GetMaxPosition()
+            << " pending=" << pending_space_scroll_offset_.value_or(-1.f);
+    return false;
+  };
+  const auto preview_offset = [&] {
+    return swipe_preview_ ? -swipe_preview_->children().front()->y() : -1;
+  };
+  expect("a Space without a remembered scroll position starts at the top",
+         current_offset() == 0.f);
+  const bool scrolled_first = wait_for_offset(first_offset, true);
+  show_space(b);
+  expect("opening another Space starts at its own top",
+         scrolled_first && std::abs(SpaceScrollOffset(a) - first_offset) < 0.01f &&
+             wait_for_offset(0));
+  const bool scrolled_second = wait_for_offset(second_offset, true);
+  show_space(a);
+  expect("direct Space selection restores that Space's scroll position",
+         scrolled_second && std::abs(SpaceScrollOffset(b) - second_offset) < 0.01f &&
+             wait_for_offset(first_offset));
+  const int previous_layer_y = space_body_->layer()->bounds().y();
+  const float next_swipe = base::i18n::IsRTL() ? 1.f : -1.f;
+  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 200);
+  send_scroll(next_swipe * 85.f, 0, ui::EventMomentumPhase::NONE, 210);
+  expect("forward swipe previews the destination at its remembered position",
+         std::abs(current_offset() - first_offset) < 0.01f &&
+             (!animate || (swipe_preview_space_id_ == b &&
+                            preview_offset() == second_offset)));
+  send_scroll(0, 0, ui::EventMomentumPhase::END, 225);
+  Refresh();
+  widget->LayoutRootViewIfNecessary();
+  expect("swipe commit keeps both columns at their positions",
+         active_space_id_ == b &&
+             (!animate || (outgoing_space_layer_ &&
+                 outgoing_space_layer_->bounds().y() ==
+                     previous_layer_y - first_offset)) &&
+             wait_for_offset(second_offset));
+  FinishSpaceTransition();
+  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 250);
+  send_scroll(-next_swipe * 85.f, 0, ui::EventMomentumPhase::NONE, 260);
+  expect("reverse swipe previews the previous Space at its remembered position",
+         std::abs(current_offset() - second_offset) < 0.01f &&
+             (!animate || (swipe_preview_space_id_ == a &&
+                            preview_offset() == first_offset)));
+  send_scroll(0, 0, ui::EventMomentumPhase::END, 275);
+  Refresh();
+  widget->LayoutRootViewIfNecessary();
+  expect("reverse swipe restores the previous Space's scroll position",
+         active_space_id_ == a && wait_for_offset(first_offset));
   FinishSpaceTransition();
   Render();
+  widget->LayoutRootViewIfNecessary();
+  expect("refreshing rows within a Space keeps its scroll position",
+         wait_for_offset(first_offset));
+  for (const auto& id : scroll_items) ws.RemoveItem(id);
+  Render();
+  widget->LayoutRootViewIfNecessary();
+  expect("a shorter Space clamps the remembered offset to the new scroll range",
+         wait_for_offset(0));
 #endif
   // Chromium nests this view in a content container whose layout may be
   // skipped when hidden. Measure the outer region that reserves window space.
