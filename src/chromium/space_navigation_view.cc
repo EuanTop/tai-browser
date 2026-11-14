@@ -269,9 +269,9 @@ class SidebarButton : public views::LabelButton {
     SetBorder(views::CreateEmptyBorder(gfx::Insets::VH(6, 9)));
     SetMinSize(gfx::Size(0, 38));
     auto font = views::TypographyProvider::Get().GetFontDetails(
-        views::style::CONTEXT_BUTTON,
-        emphasized ? views::style::STYLE_EMPHASIZED : views::style::STYLE_PRIMARY);
+        views::style::CONTEXT_BUTTON, views::style::STYLE_PRIMARY);
     font.size_delta += 2;
+    if (emphasized) font.weight = gfx::Font::Weight::SEMIBOLD;
     label()->SetFontList(ui::ResourceBundle::GetSharedInstance()
                              .GetFontListForDetails(font));
     label()->SetElideBehavior(gfx::ELIDE_TAIL);
