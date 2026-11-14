@@ -39,6 +39,21 @@ No runtime user setup/compiler/daemon is added. Plain parser and HTML/Arc fixtur
 | `entities` | `6.0.1` | BSD-2-Clause | [license](third-party/npm/entities-6.0.1.LICENSE) |
 | `htmlparser2` | `10.0.0` | MIT | [license](third-party/npm/htmlparser2-10.0.0.LICENSE) |
 
+## Arc Markdown character references
+
+The Arc Markdown welcome importer directly reuses `entities` **6.0.1**
+([upstream](https://github.com/fb55/entities), BSD-2-Clause; license in the table
+above) via `decodeHTMLStrict`. This version was already pinned in the
+`htmlparser2` runtime graph; declaring it directly adds no package instance.
+Semicolon-terminated references in text and explicit link destinations are
+decoded once without rendering HTML. Code, escaped text and autolinks stay
+literal, and decoded destinations still pass the existing HTTP(S)/credential
+checks. The existing Marked **18.1.1** tokenizer and grammar identify the raw
+inline and reference destinations so escaped ampersands keep their meaning
+during decoding. Synthetic welcome-import tests cover names, query parameters,
+literal references and rejected destinations. Native welcome-dialog validation
+remains a separate check.
+
 ## Assessed, not copied
 
 - Arcmark `18e1b4b731f9f60d493e8d55b9d67b6be0c5ce51`, https://github.com/Geek-1001/arcmark/tree/18e1b4b731f9f60d493e8d55b9d67b6be0c5ce51 ; MIT. Reviewed ArcImportService/ChromeImportService and public synthetic tests. The absent-container parentID fallback and precedence of canonical childrenIds were informed by this source. Swift runtime/parser code and upstream test fixtures are not bundled. Its line-oriented HTML parsing and dropping empty folders do not meet our preservation requirements. [Full license](third-party/arcmark/LICENSE).

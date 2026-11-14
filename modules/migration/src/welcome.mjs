@@ -1,13 +1,42 @@
 // Copyright 2026 TAi Browser contributors.
 // SPDX-License-Identifier: BSD-3-Clause
 
-import {lexer} from 'marked';
+import {lexer, Tokenizer} from 'marked';
+import {decodeHTMLStrict} from 'entities/decode';
 import {parseArcSidebar} from './arc.mjs';
 import {parseBookmarksHTML, parseChromeBookmarks} from './chrome.mjs';
 
 export const maximumImportBytes = 4 * 1024 * 1024;
 const maximumItems = 10000;
 const maximumSpaces = 256;
+
+function decodeMarkdownDestination(raw) {
+  const destination = raw.startsWith('<') && raw.endsWith('>') ? raw.slice(1, -1) : raw;
+  return destination.replace(/\\([\p{P}\p{S}])|&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]*);/gu,
+    (match, escaped) => escaped ?? decodeHTMLStrict(match));
+}
+
+// Marked validates the syntax and resolves reference links. Read its raw
+// destination before backslash removal erases the distinction between \& and &.
+class ArcMarkdownTokenizer extends Tokenizer {
+  link(source) {
+    const token = super.link(source);
+    if (token) {
+      const raw = this.rules.inline.link.exec(token.raw)?.[2];
+      if (raw !== undefined) token.href = decodeMarkdownDestination(raw.trim());
+    }
+    return token;
+  }
+
+  def(source) {
+    const token = super.def(source);
+    if (token) {
+      const raw = this.rules.block.def.exec(token.raw)?.[2];
+      if (raw !== undefined) token.href = decodeMarkdownDestination(raw);
+    }
+    return token;
+  }
+}
 
 export function previewWelcomeImport(source, input, names) {
   if (typeof input !== 'string' || new TextEncoder().encode(input).length > maximumImportBytes) {
@@ -61,7 +90,8 @@ export function previewWelcomeImport(source, input, names) {
   if (source === 'arc' && !content.startsWith('{')) {
     // The official export describes each Space as a Markdown section. Its
     // top-level section headings become Spaces, with nested headings as folders.
-    const tokens = lexer(content).filter(token => token.type !== 'space');
+    const tokens = lexer(content, {gfm: true, tokenizer: new ArcMarkdownTokenizer()})
+      .filter(token => token.type !== 'space');
     if (tokens[0]?.type === 'heading' && tokens[0].depth === 1 &&
         /^arc (data export|数据导出)$/i.test(plainText(tokens[0].tokens))) tokens.shift();
     const sectionDepth = tokens.reduce((depth, token) =>
@@ -73,7 +103,8 @@ export function previewWelcomeImport(source, input, names) {
       if (depth > 64) throw new Error('IMPORT_NESTING_LIMIT');
       for (const token of tokens) {
         if (token.type === 'link') {
-          addLink(targetSpace(), plainText(token.tokens) || token.text, parent, token.href);
+          const title = token.autolink ? token.text : plainText(token.tokens) || token.text;
+          addLink(targetSpace(), title, parent, token.href);
         } else if (token.type === 'list') {
           for (const item of token.items) {
             const nested = item.tokens.filter(part => part.type === 'list');
@@ -158,5 +189,11 @@ function containsLink(token) {
 }
 
 function plainText(tokens = []) {
-  return tokens.map(token => token.tokens ? plainText(token.tokens) : (token.text ?? '')).join('').trim();
+  return tokens.map(token => {
+    // Decode leaf text once, leaving code, backslash escapes and autolinks literal.
+    if (token.autolink) return token.text;
+    if (token.tokens) return plainText(token.tokens);
+    return token.type === 'text' && !token.escaped
+      ? decodeHTMLStrict(token.raw) : token.text ?? '';
+  }).join('').trim();
 }
