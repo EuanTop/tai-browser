@@ -4,6 +4,7 @@
 #define SIDEBAR_BROWSER_SPACE_NAVIGATION_VIEW_H_
 #include <deque>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -181,7 +182,10 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void ScheduleRefresh();
   void Refresh();
   void SyncTabs();
+  struct RenderState;
+  RenderState CaptureRenderState() const;
   void Render();
+  void Render(RenderState state);
   void ResetSpaceScrollContents();
   float SpaceScrollOffset(const std::string& space_id) const;
   void RestoreSpaceScrollAfterLayout(views::ScrollView* scroll);
@@ -302,6 +306,8 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   float swipe_distance_ = 0;
   base::TimeTicks last_swipe_;
   base::TimeTicks last_scroll_;
+  std::unique_ptr<RenderState> rendered_state_;
+  unsigned favicon_generation_ = 0;
   std::map<std::string, gfx::Image> favicon_cache_;
   std::set<std::string> requested_favicons_;
   base::CancelableTaskTracker favicon_tasks_;

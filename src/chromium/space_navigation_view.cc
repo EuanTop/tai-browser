@@ -117,6 +117,7 @@
 #include "sidebar_browser/workspace_state.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/models/image_model.h"
+#include "ui/base/resource/resource_bundle.h"
 #include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/events/event.h"
 #include "ui/gfx/image/image.h"
@@ -258,7 +259,8 @@ class SidebarButton : public views::LabelButton {
  public:
   using views::LabelButton::label;
   SidebarButton(PressedCallback callback, std::u16string text, bool selected,
-                bool dark, int radius = 8, bool paint_background = true)
+                bool dark, int radius = 8, bool paint_background = true,
+                bool emphasized = false)
       : views::LabelButton(std::move(callback), text),
         selected_(selected), dark_(dark), radius_(radius),
         paint_background_(paint_background) {
@@ -266,7 +268,12 @@ class SidebarButton : public views::LabelButton {
     SetImageLabelSpacing(text.empty() ? 0 : 10);
     SetBorder(views::CreateEmptyBorder(gfx::Insets::VH(6, 9)));
     SetMinSize(gfx::Size(0, 38));
-    label()->SetFontList(label()->font_list().DeriveWithSizeDelta(2));
+    auto font = views::TypographyProvider::Get().GetFontDetails(
+        views::style::CONTEXT_BUTTON,
+        emphasized ? views::style::STYLE_EMPHASIZED : views::style::STYLE_PRIMARY);
+    font.size_delta += 2;
+    label()->SetFontList(ui::ResourceBundle::GetSharedInstance()
+                             .GetFontListForDetails(font));
     label()->SetElideBehavior(gfx::ELIDE_TAIL);
     label()->SetSubpixelRenderingEnabled(false);
     // Colors follow the Space palette, including in inactive windows.
@@ -274,6 +281,13 @@ class SidebarButton : public views::LabelButton {
     SetAppearDisabledInInactiveWidget(false);
     SetEnabledTextColors(dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53));
     UpdateBackground();
+  }
+  void SetRowTooltip(const std::u16string& title) {
+    label()->SetHandlesTooltips(false);
+    // A custom tooltip also prevents the label from measuring the text again
+    // on bounds changes, even when tooltip handling is disabled on it.
+    label()->SetCustomTooltipText(title);
+    SetTooltipText(title);
   }
   void SetDropMark(int mark) { drop_mark_ = mark; SchedulePaint(); }
   void PaintButtonContents(gfx::Canvas* canvas) override {
@@ -367,7 +381,7 @@ class TabRow final : public views::View, public views::ViewObserver {
         std::move(activate), collapsed ? std::u16string() : title,
         false, dark, 8, false));
     if (close) title_button_->SetFocusBehavior(FocusBehavior::ALWAYS);
-    title_button_->SetTooltipText(title);
+    title_button_->SetRowTooltip(title);
     if (collapsed) {
       title_button_->GetViewAccessibility().SetName(title);
     } else {
@@ -1191,6 +1205,33 @@ DEFINE_USER_DATA(SpaceNavigationView);
 SpaceNavigationView* SpaceNavigationView::From(BrowserWindowInterface* browser) {
   return browser ? Get(browser->GetUnownedUserDataHost()) : nullptr;
 }
+struct SpaceNavigationView::RenderState {
+  struct Tab {
+    int32_t handle;
+    std::string item_id;
+    std::u16string title;
+    gfx::Image icon;
+    bool selected;
+    bool operator==(const Tab&) const = default;
+  };
+
+  std::string space;
+  std::string revision;
+  std::string editor;
+  SkColor sidebar_color;
+  std::optional<bool> toolbar_dark;
+  SpaceDockLayout dock_layout;
+  unsigned favicon_generation;
+  bool collapsed;
+  bool clear_pending;
+  int cleared = 0;
+  int kept = 0;
+  std::optional<size_t> recoverable;
+  std::vector<Tab> tabs;
+
+  bool operator==(const RenderState&) const = default;
+};
+
 SpaceNavigationView::SpaceNavigationView(
     BrowserWindowInterface* browser,
     tabs::VerticalTabStripStateController* state_controller)
@@ -1781,6 +1822,46 @@ void SpaceNavigationView::OnBoundsChanged(const gfx::Rect& previous_bounds) {
       base::BindOnce(&SpaceNavigationView::ScheduleRefresh, weak_factory_.GetWeakPtr()));
 }
 
+SpaceNavigationView::RenderState SpaceNavigationView::CaptureRenderState() const {
+  const auto* selected = model_->GetActiveTab();
+  RenderState state{
+      .space = active_space_id_,
+      .revision = workspace_->revision(),
+      .editor = edit_id_,
+      .sidebar_color = SidebarColor(),
+      .toolbar_dark = !GetVisible() && page_chrome_color_
+                          ? std::optional(color_utils::IsDark(*page_chrome_color_))
+                          : std::nullopt,
+      .dock_layout = GetSpaceDockLayout(width(), workspace_->model().spaces().size(),
+                                        collapsed_),
+      .favicon_generation = favicon_generation_,
+      .collapsed = collapsed_,
+      .clear_pending = ClearPending(active_space_id_),
+      .recoverable = std::nullopt,
+      .tabs = {},
+  };
+  if (const auto batch = clear_batches_.find(active_space_id_);
+      batch != clear_batches_.end()) {
+    state.cleared = batch->second.closed;
+    state.kept = batch->second.cancelled;
+    state.recoverable = RestorableClear(active_space_id_).size();
+  }
+  for (const auto handle : VisibleTabs(true)) {
+    const auto& binding = bindings_.at(handle.raw_value());
+    if (binding.placeholder) continue;
+    const auto* tab = handle.Get();
+    auto* contents = tab->GetContents();
+    auto* favicon = favicon::ContentFaviconDriver::FromWebContents(contents);
+    state.tabs.push_back({
+        handle.raw_value(), binding.item_id,
+        binding.item_id.empty() ? contents->GetTitle() : std::u16string(),
+        favicon && favicon->FaviconIsValid() ? favicon->GetFavicon() : gfx::Image(),
+        tab == selected,
+    });
+  }
+  return state;
+}
+
 void SpaceNavigationView::ScheduleRefresh() {
   if (refresh_pending_ || !model_) return;
   refresh_pending_ = true;
@@ -1805,7 +1886,14 @@ void SpaceNavigationView::Refresh() {
   refresh_after_transition_ = false;
   SyncTabs();
   RefreshPageChrome();
-  Render();
+  auto state = CaptureRenderState();
+  // Selecting a tab can queue several refreshes through native theme and
+  // navigation notifications. Reuse the rows if their inputs are unchanged.
+  if (!transition_direction_ && rendered_state_ && state == *rendered_state_) {
+    TRACE_EVENT_INSTANT("browser", "TAi.ReuseSidebarRows");
+    return;
+  }
+  Render(std::move(state));
 }
 void SpaceNavigationView::SetBinding(tabs::TabInterface* tab, TabOrganization value) {
   if (!tab || tab->GetContents()->GetBrowserContext() != browser_->GetProfile()) return;
@@ -2717,6 +2805,7 @@ ui::ImageModel SpaceNavigationView::SavedIcon(
              const favicon_base::FaviconImageResult& result) {
             if (self && !result.image.IsEmpty()) {
               self->favicon_cache_.insert_or_assign(url, result.image);
+              ++self->favicon_generation_;
               self->ScheduleRefresh();
             }
           }, weak_factory_.GetWeakPtr(), item.url), &favicon_tasks_);
@@ -2804,31 +2893,36 @@ void SpaceNavigationView::RenderSaved(views::BoxLayoutView* parent,
         RenderTab(rows_parent, live->second, item_depth, interactive, dark);
         continue;
       }
+      const bool folder = item->kind == SavedKind::kFolder;
+      const auto title = base::UTF8ToUTF16(item->title);
       auto* row = Row(rows_parent);
       row->SetInsideBorderInsets(gfx::Insets::TLBR(0, item_depth * 12, 0, 0));
       auto* button = row->AddChildView(std::make_unique<SidebarButton>(
           base::BindRepeating(&SpaceNavigationView::OpenItem,
                               base::Unretained(this), item->id),
-          collapsed_ ? std::u16string() : base::UTF8ToUTF16(item->title),
-          false, dark));
+          collapsed_ ? std::u16string() : title, false, dark,
+          /*radius=*/8, /*paint_background=*/true, /*emphasized=*/folder));
       row->SetFlexForView(button, 1, true);
-      button->SetTooltipText(base::UTF8ToUTF16(item->title));
+      button->SetRowTooltip(title);
       button->SetImageModel(views::Button::STATE_NORMAL,
-          item->kind == SavedKind::kFolder
+          folder
               ? ui::ImageModel::FromVectorIcon(
                     vector_icons::kFolderOpenIcon,
                     icon_color, 20)
               : SavedIcon(*item, 18, icon_color));
-      if (item->kind == SavedKind::kFolder) {
-        button->label()->SetFontList(button->label()->font_list()
-            .DeriveWithWeight(gfx::Font::Weight::SEMIBOLD));
-      }
       if (interactive) {
+        if (folder) {
+          button->SetFocusBehavior(views::View::FocusBehavior::ALWAYS);
+          if (item->collapsed)
+            button->GetViewAccessibility().SetIsCollapsed();
+          else
+            button->GetViewAccessibility().SetIsExpanded();
+        }
         RegisterRow(button, item->id, Area::kSaved);
         button->set_context_menu_controller(this);
       }
-      if (item->kind != SavedKind::kFolder || collapsed_ ||
-          item_depth >= 32 || !children.contains(item->id)) continue;
+      if (!folder || collapsed_ || item_depth >= 32 ||
+          !children.contains(item->id)) continue;
       if (interactive) {
         auto reveal = std::make_unique<FolderRevealView>(
             item_depth + 1, !item->collapsed);
@@ -2990,7 +3084,11 @@ void SpaceNavigationView::RestoreSpaceScrollAfterLayout(views::ScrollView* scrol
     scroll->ScrollToOffset(gfx::PointF(0, offset));
 }
 void SpaceNavigationView::Render() {
-  if (!workspace_->loaded() || !model_) return;
+  if (workspace_->loaded() && model_) Render(CaptureRenderState());
+}
+
+void SpaceNavigationView::Render(RenderState state) {
+  rendered_state_ = std::make_unique<RenderState>(std::move(state));
   TRACE_EVENT("browser", "TAi.RenderSidebar");
   const auto visible_offset = space_scroll_->CurrentOffset();
   const bool new_space = rendered_space_id_ != active_space_id_;
@@ -3743,6 +3841,26 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
          active_space_id_ == a);
   FinishSpaceTransition();
   ws.RemoveItem(preview_pin);
+
+  // Native toolbar/navigation notifications with the same rendered inputs
+  // must preserve the row hierarchy, while a workspace edit invalidates it.
+  Render();
+  views::ViewTracker retained_rows;
+  retained_rows.SetView(space_body_);
+  Refresh();
+  expect("unchanged sidebar refresh reuses its native rows",
+         retained_rows.view() == space_body_);
+  const auto refresh_pin = NewId();
+  ws.AddItem({refresh_pin, a, {}, "Refresh pin",
+              "https://example.invalid/refresh", SavedKind::kPage});
+  workspace_->Commit();
+  Refresh();
+  expect("workspace changes rebuild the sidebar with the new saved row",
+         !retained_rows.view() &&
+             std::ranges::any_of(row_items_, [&](const auto& entry) {
+               return entry.second == refresh_pin;
+             }));
+  ws.RemoveItem(refresh_pin);
 
   // Give both Spaces distinct scroll positions past the first viewport.
   std::vector<std::string> scroll_items;
