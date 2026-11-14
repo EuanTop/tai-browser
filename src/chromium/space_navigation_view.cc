@@ -1942,11 +1942,21 @@ void SpaceNavigationView::OnSpaceTransitionFinished(unsigned generation) {
   outgoing_title_layer_.reset();
   if (const int direction = std::exchange(settling_swipe_direction_, 0)) {
     const std::string target = swipe_preview_space_id_;
-    // The incoming preview already covers the viewport. Replace it with live
-    // rows and activate the page only after the compositor has settled.
+    // A new swipe can finish the handoff before the compositor callback.
+    // Stop both animators before Refresh so it can install the live rows now.
+    ++transition_generation_;
+    space_body_->layer()->GetAnimator()->StopAnimating();
+    space_header_->layer()->GetAnimator()->StopAnimating();
+    // The incoming preview covers the viewport until the live rows take over.
     base::AutoReset<int> gesture(&gesture_direction_override_, direction);
     SelectSpace(target, /*animate=*/false);
     Refresh();
+    if (rendered_space_id_ != target) {
+      space_body_->layer()->SetTransform(gfx::Transform());
+      space_body_->layer()->SetOpacity(1.f);
+      space_header_->layer()->SetTransform(gfx::Transform());
+      space_header_->layer()->SetOpacity(1.f);
+    }
   }
   RemoveSwipePreview();
   if (space_body_) space_body_->SetCanProcessEventsWithinSubtree(true);
