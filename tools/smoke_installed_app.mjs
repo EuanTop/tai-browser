@@ -28,8 +28,9 @@ try {
   expect('new-tab page uses TAi home',await browser.evaluate("location.href==='chrome://tai/home.html'"));
   expect('approved architecture loads from installed app',await until(()=>browser.evaluate(`(async()=>{
     const hero=document.querySelector('.atrium-hero');
-    if(!hero||!getComputedStyle(hero).backgroundImage.includes('brand-standard-hero.png'))return false;
-    const image=new Image();image.src='brand-standard-hero.png';await image.decode();return image.naturalWidth>0&&image.naturalHeight>0;
+    if(!hero||!hero.currentSrc.endsWith('/brand-standard-hero.png'))return false;
+    await hero.decode();
+    return hero.naturalWidth>0&&hero.naturalHeight>0;
   })()`)));
   await browser.call('Page.navigate',{url:'http://127.0.0.1:'+server.address().port+'/'});
   expect('installed app opens real web content',await until(()=>browser.evaluate("document.title==='TAi 安装检查'&&document.body.textContent.includes('本地安装后的真实网页')")));

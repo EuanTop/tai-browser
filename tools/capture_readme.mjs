@@ -15,8 +15,8 @@ const browser=await startNativeBrowser(build.binary,profile,{navigate:false,init
 try {
   await browser.call('Emulation.setDeviceMetricsOverride',{width:1280,height:940,deviceScaleFactor:1,mobile:false});
   await browser.call('Page.navigate',{url:'chrome://tai/home.html'});
-  await until(()=>browser.evaluate("location.pathname==='/home.html'&&document.documentElement.dataset.edition==='standard'&&document.querySelector('h1')?.textContent==='Room to think.'"));
-  await browser.evaluate("(async()=>{await document.fonts.ready;const image=new Image();image.src='brand-standard-hero.png';await image.decode();})()");
+  await until(()=>browser.evaluate("location.pathname==='/home.html'&&document.documentElement.dataset.edition==='standard'&&document.querySelector('.atrium-hero')?.naturalWidth>0"));
+  await browser.evaluate("(async()=>{await document.querySelector('.atrium-hero').decode();})()");
   const shot=await browser.call('Page.captureScreenshot',{format:'png'});
   const bytes=Buffer.from(shot.data,'base64');
   await writeFile(join(output,'new-tab.png'),bytes);

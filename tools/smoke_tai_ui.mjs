@@ -150,16 +150,10 @@ try{
       },welcome.sessionId);
       await until(async()=>!(await browser.call('Target.getTargets')).targetInfos.some(target=>target.targetId===welcome.targetId));
     }
-    await until(()=>browser.evaluate("document.documentElement.lang==='en'&&document.querySelector('#home-space')?.textContent==='外观'"));
-    expect('home uses the saved language while preserving the Space name',await browser.evaluate("document.querySelector('h1').textContent==='Room to think.'&&document.querySelector('#home-agent strong').textContent==='Bring my Agent'"));
-    current=await browser.state();const locationBinding={...override,focus_location:{binding:'Alt+Command+L',priority:'browser'},downloads:{binding:'Command+Shift+J',priority:'browser'}};
-    // Downloads has this alternate by default; use an unused combination.
-    locationBinding.focus_location.binding='Ctrl+Command+L';
-    const homeHintPatch=await browser.command(request(current,{shortcuts:locationBinding}));
-    expect('home accepts a valid address-field shortcut override',homeHintPatch.ok);current=homeHintPatch.value;
-    await until(()=>browser.evaluate("document.querySelector('#home-search-hint').textContent==='⌃ ⌘ L Search or enter a URL'"));
-    expect('home shortcut hint reflects the actual native binding',await browser.evaluate("document.querySelector('#home-search-hint').textContent.startsWith('⌃ ⌘ L')"));
-    current=(await browser.command(request(current,{shortcuts:override}))).value;
+    await until(()=>browser.evaluate("location.pathname==='/home.html'&&document.title==='TAi · New Tab'"));
+    expect('home uses the saved language for the tab title and image description',
+      await browser.evaluate(`document.documentElement.lang==='en'&&
+        document.querySelector('.atrium-hero')?.alt==='Natural light through a circular courtyard, across pale walls and water'`));
 
     await browser.call('Page.navigate',{url:'chrome://tai/panel.html'});
     await until(()=>browser.evaluate("document.documentElement.lang==='en'&&document.querySelector('.agent-create')?.textContent==='Authorize browser tools'"));
