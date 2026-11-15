@@ -4,9 +4,9 @@
 
 ## 下载
 
-Alpha 1 面向 Apple Silicon Mac。从 [GitHub Releases](https://github.com/EuanTop/tai-browser/releases) 下载 DMG，打开后把 **TAi Browser** 拖入「应用程序」。发行页面会列出支持的 macOS 版本，并提供 `SHA256SUMS` 用于核对下载文件。
+[下载 TAi Browser Alpha 1](https://github.com/EuanTop/tai-browser/releases/tag/v0.1.0-alpha.1)，适用于 macOS 13 或更新版本的 Apple Silicon Mac。在发行附件中选择 `TAi-Browser-0.1.0-alpha.1-mac-arm64.dmg`，并用同页的 `SHA256SUMS` 核对文件校验值。
 
-**DMG 使用临时签名，尚未经过 Apple 公证。** 如果 macOS 因无法验证开发者而拦截首次启动，请先核对下载文件，再按 Apple 指引在「系统设置 → 隐私与安全性」中对该应用选择「仍要打开」。[Apple 安全打开应用指南](https://support.apple.com/zh-cn/102445)
+打开 DMG，将 **TAi Browser** 拖入「应用程序」，再从那里启动。Alpha 1 使用临时签名，尚未经过 Apple 公证。若 macOS 阻止首次启动，可按 Apple 的说明为这个应用选择「仍要打开」。[Apple 的说明](https://support.apple.com/en-us/102445)
 
 ## 开始浏览
 
@@ -15,6 +15,8 @@ Alpha 1 面向 Apple Silicon Mac。从 [GitHub Releases](https://github.com/Euan
 macOS 下，**⌘T** 新建标签、**⌘L** 聚焦地址栏，默认 **⌘S** 切换侧栏。应用运行并保留窗口时，**⌥⌘N** 唤起全局搜索。快捷键可以在 TAi 设置中修改；系统冲突和网站优先规则见[快捷键与语言](ACCOUNTS-AND-SHORTCUTS.md)。
 
 在 **TAi 设置 → 外观 → 界面语言**中选择「跟随系统」「简体中文」或「English」，TAi 自有界面会立即切换。Chromium 原生设置、历史记录和扩展程序页面使用 macOS 分配给 TAi 的应用语言。要把这些页面切成简体中文，请在 **macOS 系统设置 → 通用 → 语言与地区 → 应用程序**中为 **TAi Browser** 选「简体中文」，然后重启 TAi。[Apple 的按应用设置语言说明](https://support.apple.com/zh-cn/guide/mac-help/mh26684/mac)
+
+可通过 **TAi 设置 → 浏览器 → 默认浏览器**，点击「设为默认」后在 macOS 中确认。TAi 设置里的专用入口已加入开发版。在 Alpha 1 中，可打开 **macOS 系统设置 → 桌面与程序坞 → 默认网页浏览器**，选择 **TAi Browser**。[Apple 的说明](https://support.apple.com/en-ie/102362)
 
 ## 连接 Agent
 
