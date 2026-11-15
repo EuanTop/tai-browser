@@ -3994,6 +3994,36 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   expect("cancelling the swipe restores the original backdrop immediately",
          painted_backdrop(this) == 0xffccddf2 && !swipe_preview_ &&
              !swipe_preview_title_);
+  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 30);
+  send_scroll(-45, 0, ui::EventMomentumPhase::NONE, 40);
+  send_scroll(-40, 0, ui::EventMomentumPhase::NONE, 70);
+  expect("crossing the distance threshold still waits for lift", active_space_id_ == a);
+  send_scroll(0, 0, ui::EventMomentumPhase::END, 75);
+  expect("lift settles the same two lists without rebuilding rows on the input path",
+         !animate || (active_space_id_ == a && settling_swipe_direction_ == 1 &&
+             swipe_preview_ && swipe_preview_->layer()->GetTargetTransform().IsIdentity() &&
+             space_body_->layer()->GetTargetOpacity() == 0.f &&
+             swipe_backdrop_animation_ && SidebarBackdropColor() != SidebarColor()));
+  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
+  Refresh();
+  expect("the settled swipe activates the destination and resets its transform",
+         active_space_id_ == b && space_body_->layer()->transform().IsIdentity());
+  expect("committing the swipe paints the destination backdrop immediately",
+         painted_backdrop(this) == 0xff35333f);
+  send_scroll(-150, 0, ui::EventMomentumPhase::INERTIAL_UPDATE, 100);
+  send_scroll(0, 0, ui::EventMomentumPhase::END, 130);
+  expect("trackpad momentum cannot switch again", active_space_id_ == b);
+  FinishSpaceTransition();
+  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 160);
+  send_scroll(85, 0, ui::EventMomentumPhase::NONE, 170);
+  expect("right swipe over blank sidebar waits for lift", active_space_id_ == b);
+  send_scroll(0, 0, ui::EventMomentumPhase::END, 185);
+  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
+  Refresh();
+  expect("right swipe over blank sidebar returns to the previous Space",
+         active_space_id_ == a);
+  FinishSpaceTransition();
+  widget->LayoutRootViewIfNecessary();
   if (animate) {
     // Sample the actual window compositor. Painting the Background on a
     // scratch Canvas cannot detect stale textures in other Views layers.
@@ -4098,33 +4128,6 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     SelectSpace(a, /*animate=*/false);
     Refresh();
   }
-  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 30);
-  send_scroll(-45, 0, ui::EventMomentumPhase::NONE, 40);
-  send_scroll(-40, 0, ui::EventMomentumPhase::NONE, 70);
-  expect("crossing the distance threshold still waits for lift", active_space_id_ == a);
-  send_scroll(0, 0, ui::EventMomentumPhase::END, 75);
-  expect("lift settles the same two lists without rebuilding rows on the input path",
-         !animate || (active_space_id_ == a && settling_swipe_direction_ == 1 &&
-             swipe_preview_ && swipe_preview_->layer()->GetTargetTransform().IsIdentity() &&
-             space_body_->layer()->GetTargetOpacity() == 0.f &&
-             swipe_backdrop_animation_ && SidebarBackdropColor() != SidebarColor()));
-  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
-  Refresh();
-  expect("the settled swipe activates the destination and resets its transform",
-         active_space_id_ == b && space_body_->layer()->transform().IsIdentity());
-  send_scroll(-150, 0, ui::EventMomentumPhase::INERTIAL_UPDATE, 100);
-  send_scroll(0, 0, ui::EventMomentumPhase::END, 130);
-  expect("trackpad momentum cannot switch again", active_space_id_ == b);
-  FinishSpaceTransition();
-  send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 160);
-  send_scroll(85, 0, ui::EventMomentumPhase::NONE, 170);
-  expect("right swipe over blank sidebar waits for lift", active_space_id_ == b);
-  send_scroll(0, 0, ui::EventMomentumPhase::END, 185);
-  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
-  Refresh();
-  expect("right swipe over blank sidebar returns to the previous Space",
-         active_space_id_ == a);
-  FinishSpaceTransition();
   ws.RemoveItem(preview_pin);
 
   const auto* original_space = ws.FindSpace(a);
