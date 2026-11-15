@@ -16,7 +16,7 @@ class OverlayOwnershipTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.originals = {name: overlay.upstream(name)
-                         for name in (*overlay.GLOBAL_SEARCH_FILES, overlay.OMNIBOX, overlay.OMNIBOX_INPUT, overlay.SCHEME_CLASSIFIER, overlay.LOCATION_IDENTITY, overlay.FOCUS, overlay.BINDERS, overlay.BUILD, overlay.REGION, overlay.STATE,
+                         for name in (*overlay.GLOBAL_SEARCH_FILES, *overlay.DEFAULT_BROWSER_INFOBARS, overlay.STARTUP_INFOBARS, overlay.OMNIBOX, overlay.OMNIBOX_INPUT, overlay.SCHEME_CLASSIFIER, overlay.LOCATION_IDENTITY, overlay.FOCUS, overlay.BINDERS, overlay.BUILD, overlay.REGION, overlay.STATE,
                                       overlay.COMMANDS, overlay.RESTORE, overlay.SESSION_RESTORE, overlay.SESSION_SERVICE, overlay.CONTEXT, overlay.TOOLBAR, overlay.LOCATION, overlay.WIDGET, overlay.BROWSER_VIEW, overlay.PAGES, overlay.COMMAND_CONTROLLER, overlay.KEY_DISPATCH, overlay.COCOA_TEXT_INPUT, overlay.MULTI_CONTENTS, overlay.RELOAD, overlay.WEBUI_RELOAD, overlay.WEBUI, overlay.UNTRUSTED, overlay.PANEL_IDS, overlay.PANEL_ID_IMPL,
                                       'chrome/browser/ui/views/frame/themed_background.cc',
                                       'chrome/browser/ui/views/frame/main_background_region_view.cc',

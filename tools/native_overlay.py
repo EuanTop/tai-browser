@@ -34,6 +34,11 @@ COMMANDS = 'chrome/browser/ui/browser_commands.cc'
 RESTORE = 'chrome/browser/ui/browser_tabrestore.cc'
 SESSION_RESTORE = 'chrome/browser/sessions/session_restore.cc'
 SESSION_SERVICE = 'chrome/browser/sessions/session_service_base.cc'
+STARTUP_INFOBARS = 'chrome/browser/ui/startup/infobar_utils.cc'
+DEFAULT_BROWSER_INFOBARS = (
+    'chrome/browser/ui/startup/default_browser_prompt/default_browser_infobar_delegate.cc',
+    'chrome/browser/ui/startup/default_browser_prompt/default_browser_infobar_manager.cc',
+)
 CONTEXT = 'chrome/browser/ui/browser_live_tab_context.cc'
 TOOLBAR = 'chrome/browser/ui/views/toolbar/toolbar_view.cc'
 LOCATION = 'chrome/browser/ui/views/location_bar/location_bar_view.cc'
@@ -350,6 +355,54 @@ void OmniboxEverywhereUIManager::CreateAndInitWidget(''')
 
 
 def changes():
+    startup_infobars = upstream(STARTUP_INFOBARS).decode()
+    startup_infobars = replace_once(startup_infobars,
+        '#if !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_ANDROID)\n  if (is_web_app ||',
+        '#if !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_ANDROID)\n'
+        '#if BUILDFLAG(IS_MAC)\n'
+        '  if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser")) {\n'
+        '    if (!is_web_app && !IsKioskModeEnabled() && profile->IsRegularProfile() &&\n'
+        '        !startup_command_line.HasSwitch(switches::kNoDefaultBrowserCheck)) {\n'
+        '      ShowDefaultBrowserPrompt(profile, base::DoNothing());\n'
+        '    }\n'
+        '    return;\n'
+        '  }\n'
+        '#endif\n'
+        '  if (is_web_app ||')
+    default_delegate_path, default_manager_path = DEFAULT_BROWSER_INFOBARS
+    default_delegate = upstream(default_delegate_path).decode()
+    default_delegate = replace_once(default_delegate,
+        '#include "base/types/pass_key.h"',
+        '#include "base/command_line.h"\n#include "base/strings/string_util.h"\n'
+        '#include "base/types/pass_key.h"')
+    default_delegate = replace_once(default_delegate,
+        '  return dark_mode() ? features::IsRoundedIconsEnabled()',
+        '  if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser"))\n'
+        '    return vector_icons::kGlobeIcon;\n'
+        '  return dark_mode() ? features::IsRoundedIconsEnabled()')
+    default_delegate = replace_once(default_delegate,
+        '  return l10n_util::GetStringUTF16(can_pin_to_taskbar_\n'
+        '                                       ? IDS_DEFAULT_BROWSER_PIN_INFOBAR_TEXT\n'
+        '                                       : IDS_DEFAULT_BROWSER_INFOBAR_TEXT);',
+        '  auto message = l10n_util::GetStringUTF16(can_pin_to_taskbar_\n'
+        '                                      ? IDS_DEFAULT_BROWSER_PIN_INFOBAR_TEXT\n'
+        '                                      : IDS_DEFAULT_BROWSER_INFOBAR_TEXT);\n'
+        '  if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser")) {\n'
+        '    base::ReplaceSubstringsAfterOffset(\n'
+        '        &message, 0, l10n_util::GetStringUTF16(IDS_PRODUCT_NAME), u"TAi Browser");\n'
+        '  }\n'
+        '  return message;')
+    default_manager = upstream(default_manager_path).decode()
+    default_manager = replace_once(default_manager,
+        '#include "base/functional/bind.h"',
+        '#include "base/command_line.h"\n#include "base/functional/bind.h"')
+    default_manager = replace_once(default_manager,
+        'bool IsMigrated() {\n  return infobars::IsInfoBarMigrated(',
+        'bool IsMigrated() {\n'
+        '  // TAi uses its branded prompt from the native confirm delegate.\n'
+        '  if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser"))\n'
+        '    return false;\n'
+        '  return infobars::IsInfoBarMigrated(')
     omni_input = upstream(OMNIBOX_INPUT).decode()
     omni_input = replace_once(omni_input, '#include "chrome/browser/ui/omnibox/chrome_omnibox_client.h"',
         '#include "chrome/browser/ui/omnibox/chrome_omnibox_client.h"\n#include "base/command_line.h"\n#include "sidebar_browser/internal_urls.h"')
@@ -1006,7 +1059,7 @@ def changes():
         '  return base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser")\n'
         '      ? sidebar::DisplayTaiURL(url, std::move(formatted)) : formatted;')
     return {**settings_overlay.changes(upstream, replace_once), **global_search_changes(), OMNIBOX_INPUT: omni_input.encode(), SCHEME_CLASSIFIER: scheme.encode(), LOCATION_IDENTITY: identity.encode(), PAGES: pages.encode(), COMMAND_CONTROLLER: controller.encode(), KEY_DISPATCH: key_dispatch.encode(), COCOA_TEXT_INPUT: cocoa_text.encode(), **reload_sources, ext_toolbar_path: ext_toolbar.encode(), panel_path: panel.encode(), themed_path: themed.encode(), main_bg_path: main_bg.encode(), mac_path: mac.encode(), OMNIBOX: omnibox.encode(), FOCUS: focus.encode(), BINDERS: binders.encode(), PANEL_IDS: panel_ids.encode(), PANEL_ID_IMPL: panel_impl.encode(), UNTRUSTED: untrusted.encode(), BUILD: build.encode(), WEBUI: webui.encode(), REGION: region.encode(), STATE: state.encode(),
-            COMMANDS: commands.encode(), RESTORE: restore.encode(), SESSION_RESTORE: session_restore.encode(), SESSION_SERVICE: session_service.encode(), CONTEXT: context.encode(), TOOLBAR: toolbar.encode(), LOCATION: location.encode(), WIDGET: widget.encode(), BROWSER_VIEW: browser_view.encode(), MULTI_CONTENTS: multi_contents.encode()}
+            COMMANDS: commands.encode(), RESTORE: restore.encode(), SESSION_RESTORE: session_restore.encode(), SESSION_SERVICE: session_service.encode(), STARTUP_INFOBARS: startup_infobars.encode(), default_delegate_path: default_delegate.encode(), default_manager_path: default_manager.encode(), CONTEXT: context.encode(), TOOLBAR: toolbar.encode(), LOCATION: location.encode(), WIDGET: widget.encode(), BROWSER_VIEW: browser_view.encode(), MULTI_CONTENTS: multi_contents.encode()}
 
 
 def stage():
