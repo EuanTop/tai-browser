@@ -295,7 +295,7 @@ class SidebarButton : public views::LabelButton {
     SetTooltipText(title);
   }
   void SetDropMark(int mark) { drop_mark_ = mark; SchedulePaint(); }
-  void SetDark(bool dark) {
+  virtual void SetDark(bool dark) {
     if (dark_ == dark) return;
     dark_ = dark;
     const SkColor ink = dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53);
@@ -354,15 +354,22 @@ class TabRowCloseButton final : public views::ImageButton {
  public:
   TabRowCloseButton(PressedCallback callback, bool saved, SkColor ink,
                     std::u16string label)
-      : views::ImageButton(std::move(callback)), ink_(ink) {
+      : views::ImageButton(std::move(callback)), saved_(saved), ink_(ink) {
     SetImageHorizontalAlignment(ALIGN_CENTER);
     SetImageVerticalAlignment(ALIGN_MIDDLE);
     SetImageModel(STATE_NORMAL, ui::ImageModel::FromVectorIcon(
-                                    saved ? kRemoveIcon : kCloseIcon, ink, 14));
+                                    saved_ ? kRemoveIcon : kCloseIcon, ink, 14));
     SetTooltipText(label);
     GetViewAccessibility().SetName(label);
     SetFocusBehavior(FocusBehavior::ALWAYS);
     SetRequestFocusOnPress(false);
+  }
+
+  void SetInk(SkColor ink) {
+    ink_ = ink;
+    SetImageModel(STATE_NORMAL, ui::ImageModel::FromVectorIcon(
+                                    saved_ ? kRemoveIcon : kCloseIcon, ink_, 14));
+    SchedulePaint();
   }
 
  private:
@@ -382,7 +389,8 @@ class TabRowCloseButton final : public views::ImageButton {
     canvas->DrawCircle(gfx::PointF(GetLocalBounds().CenterPoint()), 10, flags);
   }
 
-  const SkColor ink_;
+  const bool saved_;
+  SkColor ink_;
 };
 BEGIN_METADATA(TabRowCloseButton)
 END_METADATA
@@ -431,6 +439,15 @@ class TabRow final : public views::View, public views::ViewObserver {
   }
 
   SidebarButton* title_button() const { return title_button_; }
+
+  void SetDark(bool dark) {
+    if (dark_ == dark) return;
+    dark_ = dark;
+    title_button_->SetDark(dark);
+    if (close_button_)
+      close_button_->SetInk(dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53));
+    SchedulePaint();
+  }
 
  private:
   void OnBoundsChanged(const gfx::Rect& previous_bounds) override {
@@ -482,7 +499,7 @@ class TabRow final : public views::View, public views::ViewObserver {
   }
 
   const bool selected_;
-  const bool dark_;
+  bool dark_;
   bool hovered_ = false;
   raw_ptr<SidebarButton> title_button_;
   raw_ptr<TabRowCloseButton> close_button_ = nullptr;
@@ -495,9 +512,14 @@ class NewTabButton final : public SidebarButton {
   METADATA_HEADER(NewTabButton, SidebarButton)
  public:
   NewTabButton(PressedCallback callback, std::u16string label, bool dark)
-      : SidebarButton(std::move(callback), std::move(label), false, dark, 14),
-        ink_(dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53)) {
+      : SidebarButton(std::move(callback), std::move(label), false, dark, 14) {
     SetMinSize(gfx::Size(0, 40));
+    UpdateInk();
+  }
+
+  void SetDark(bool dark) override {
+    if (this->dark() == dark) return;
+    SidebarButton::SetDark(dark);
     UpdateInk();
   }
 
@@ -517,12 +539,11 @@ class NewTabButton final : public SidebarButton {
   void UpdateInk() {
     const bool emphasized = HasFocus() || GetState() == STATE_HOVERED ||
                             GetState() == STATE_PRESSED;
-    const SkColor color = emphasized ? ink_ : SkColorSetA(ink_, 160);
+    const SkColor ink = dark() ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53);
+    const SkColor color = emphasized ? ink : SkColorSetA(ink, 160);
     SetEnabledTextColors(color);
     SetImageModel(STATE_NORMAL, ui::ImageModel::FromVectorIcon(kAddIcon, color, 20));
   }
-
-  const SkColor ink_;
 };
 BEGIN_METADATA(NewTabButton)
 END_METADATA
@@ -683,43 +704,61 @@ const ui::ClipboardFormatType& SidebarDragFormat() {
       ui::ClipboardFormatType::CustomPlatformType("org.sidebar-browser.tab"));
   return *format;
 }
-// Draw the same spectrum in the frame, fixed regions and the incoming page.
-// Each stop keeps the Space's chosen color as the majority of its pigment.
-struct SidebarPalette {
-  SkColor color;
-  bool pride;
-};
+// Anchor the middle stop to the chosen color. The neighboring hues fan out
+// around it with softer chroma near neutral colors and more light at the
+// leading edge. Blend whole palettes during a swipe to avoid reinterpreting
+// the hue when two complementary colors pass through gray.
+SidebarBackdropColors MakeSidebarBackdrop(SkColor color, bool pride) {
+  SidebarBackdropColors colors{color, {}};
+  colors.stops.fill(color);
+  if (!pride) return colors;
+  color_utils::HSL seed;
+  color_utils::SkColorToHSL(color, &seed);
+  const double hue = seed.s < 0.07 ? 0.70 : seed.h;
+  const double saturation = std::clamp(seed.s * 0.68 + 0.24, 0.32, 0.75);
+  const double spread = 0.87 + seed.s * 0.2;
+  constexpr std::array hue_offsets{-0.16, -0.07, 0.0, 0.085, 0.18};
+  constexpr std::array light_offsets{0.075, 0.038, 0.0, 0.022, -0.040};
+  for (size_t i = 0; i < colors.stops.size(); ++i) {
+    if (i == colors.stops.size() / 2) continue;
+    const double lightness = std::clamp(seed.l + light_offsets[i], 0.09, 0.95);
+    const SkColor tint = color_utils::HSLToSkColor(
+        {std::fmod(hue + hue_offsets[i] * spread + 1, 1), saturation, lightness},
+        SK_AlphaOPAQUE);
+    colors.stops[i] = color_utils::AlphaBlend(tint, color, 0.64f);
+  }
+  return colors;
+}
+
+SidebarBackdropColors BlendSidebarBackdrops(const SidebarBackdropColors& from,
+                                             const SidebarBackdropColors& to,
+                                             double progress) {
+  SidebarBackdropColors colors{gfx::Tween::ColorValueBetween(progress, from.base, to.base), {}};
+  for (size_t i = 0; i < colors.stops.size(); ++i) {
+    colors.stops[i] = gfx::Tween::ColorValueBetween(progress, from.stops[i], to.stops[i]);
+  }
+  return colors;
+}
+
 void PaintSidebarBackdrop(gfx::Canvas* canvas, const views::View* view,
                           const SpaceNavigationView* sidebar,
-                          const SkPath* path = nullptr,
-                          std::optional<SidebarPalette> palette = std::nullopt) {
-  const SidebarPalette style = palette ? *palette : SidebarPalette{
-      sidebar->SidebarBackdropColor(), sidebar->HasPrideBackdrop()};
-  cc::PaintFlags flags; flags.setAntiAlias(true); flags.setColor(style.color);
+                          const SkPath* path = nullptr) {
+  const auto colors = sidebar->BackdropColors();
+  cc::PaintFlags flags; flags.setAntiAlias(true); flags.setColor(colors.base);
   const auto draw = [&] { if (path) canvas->DrawPath(*path, flags); else canvas->DrawRect(view->GetLocalBounds(), flags); };
-  if (!style.pride || !view->GetWidget()) { draw(); return; }
+  if (!sidebar->HasPrideBackdrop() || !view->GetWidget()) { draw(); return; }
   gfx::Point origin;
   views::View::ConvertPointToTarget(view, view->GetWidget()->GetRootView(), &origin);
   gfx::Point sidebar_origin;
   views::View::ConvertPointToTarget(sidebar, view->GetWidget()->GetRootView(),
                                     &sidebar_origin);
-  const float start = palette ? 0 : sidebar_origin.x() - origin.x();
+  const float start = sidebar_origin.x() - origin.x();
   const float width = std::max(1, sidebar->width());
   const float center = sidebar_origin.y() - origin.y() + sidebar->height() / 2.f;
   const SkPoint points[] = {{start, center - width * 0.07f},
                             {start + width, center + width * 0.07f}};
-  constexpr std::array<SkColor, 6> light = {
-      0xfff5b8d6, 0xffffd09b, 0xfff9eda8, 0xfface5ce, 0xffa8c9fb, 0xffcfb5f2};
-  constexpr std::array<SkColor, 6> dark = {
-      0xffa54874, 0xffa56d42, 0xff8a8137, 0xff358673, 0xff416fb0, 0xff784eb0};
-  const float lightness = color_utils::GetRelativeLuminance(style.color);
-  const float light_share = std::clamp((lightness - 0.1f) / 0.5f, 0.f, 1.f);
-  std::array<SkColor4f, light.size()> spectrum;
-  for (size_t index = 0; index < light.size(); ++index) {
-    const SkColor tint = color_utils::AlphaBlend(light[index], dark[index], light_share);
-    spectrum[index] = SkColor4f::FromColor(
-        color_utils::AlphaBlend(tint, style.color, 0.43f));
-  }
+  std::array<SkColor4f, 5> spectrum;
+  std::ranges::transform(colors.stops, spectrum.begin(), SkColor4f::FromColor);
   flags.setColor(SK_ColorWHITE);
   flags.setShader(cc::PaintShader::MakeLinearGradient(
       points, spectrum.data(), nullptr, spectrum.size(), SkTileMode::kClamp));
@@ -727,16 +766,13 @@ void PaintSidebarBackdrop(gfx::Canvas* canvas, const views::View* view,
 }
 class SidebarBackdrop final : public views::Background {
  public:
-  explicit SidebarBackdrop(SpaceNavigationView* sidebar,
-                           std::optional<SidebarPalette> palette = std::nullopt)
-      : sidebar_(sidebar), palette_(palette) {}
+  explicit SidebarBackdrop(SpaceNavigationView* sidebar) : sidebar_(sidebar) {}
   void Paint(gfx::Canvas* canvas, views::View* view) const override {
-    PaintSidebarBackdrop(canvas, view, sidebar_, nullptr, palette_);
+    PaintSidebarBackdrop(canvas, view, sidebar_);
   }
 
  private:
   raw_ptr<SpaceNavigationView> sidebar_;
-  std::optional<SidebarPalette> palette_;
 };
 // Reuse Chromium's complete toolbar/omnibox palettes rather than manually
 // inventing text, hover, focus, disabled and security-warning colors. The
@@ -1237,7 +1273,7 @@ class SpaceNavigationView::SwipeBackdropAnimation final
     : public views::AnimationDelegateViews {
  public:
   SwipeBackdropAnimation(SpaceNavigationView& sidebar, base::TimeDelta duration,
-                         SkColor from, SkColor to)
+                         SidebarBackdropColors from, SidebarBackdropColors to)
       : views::AnimationDelegateViews(&sidebar), sidebar_(&sidebar), from_(from), to_(to),
         animation_(duration, gfx::LinearAnimation::kDefaultFrameRate, this) {
     animation_.Start();
@@ -1245,14 +1281,14 @@ class SpaceNavigationView::SwipeBackdropAnimation final
 
  private:
   void AnimationProgressed(const gfx::Animation* animation) override {
-    sidebar_->SetSwipeBackdropColor(gfx::Tween::ColorValueBetween(
-        gfx::Tween::CalculateValue(gfx::Tween::EASE_OUT, animation->GetCurrentValue()),
-        from_, to_));
+    sidebar_->SetSwipeBackdrop(BlendSidebarBackdrops(
+        from_, to_, gfx::Tween::CalculateValue(gfx::Tween::EASE_OUT,
+                                               animation->GetCurrentValue())));
   }
 
   const raw_ptr<SpaceNavigationView> sidebar_;
-  const SkColor from_;
-  const SkColor to_;
+  const SidebarBackdropColors from_;
+  const SidebarBackdropColors to_;
   gfx::LinearAnimation animation_;
 };
 
@@ -1444,7 +1480,11 @@ SkColor SpaceNavigationView::SidebarColor() const {
   return SidebarColorFor(active_space_id_);
 }
 SkColor SpaceNavigationView::SidebarBackdropColor() const {
-  return swipe_backdrop_color_ ? *swipe_backdrop_color_ : SidebarColor();
+  return swipe_backdrop_ ? swipe_backdrop_->base : SidebarColor();
+}
+SidebarBackdropColors SpaceNavigationView::BackdropColors() const {
+  return swipe_backdrop_ ? *swipe_backdrop_ :
+      MakeSidebarBackdrop(SidebarColor(), HasPrideBackdrop());
 }
 ui::ColorProviderKey::InitializerSupplier&
 SpaceNavigationView::GlobalSearchPalette() const {
@@ -1475,14 +1515,14 @@ bool SpaceNavigationView::HasPrideBackdrop() const {
   return workspace_->edition() == "pride";
 }
 bool SpaceNavigationView::IsDark() const { return color_utils::IsDark(SidebarColor()); }
-void SpaceNavigationView::SetSwipeBackdropColor(std::optional<SkColor> color) {
-  if (color == swipe_backdrop_color_) return;
-  const SkColor previous = SidebarBackdropColor();
-  swipe_backdrop_color_ = color;
-  const SkColor current = SidebarBackdropColor();
+void SpaceNavigationView::SetSwipeBackdrop(std::optional<SidebarBackdropColors> colors) {
+  if (colors == swipe_backdrop_) return;
+  const auto previous = BackdropColors();
+  swipe_backdrop_ = std::move(colors);
+  const auto current = BackdropColors();
   if (previous == current) return;
-  const bool dark = color_utils::IsDark(current);
-  if (color_utils::IsDark(previous) != dark) UpdateSharedSidebarInk(dark);
+  const bool dark = color_utils::IsDark(current.base);
+  if (color_utils::IsDark(previous.base) != dark) UpdateSidebarInk(dark);
   ScheduleSidebarBackdropPaint();
 }
 
@@ -1504,15 +1544,27 @@ void SpaceNavigationView::ScheduleSidebarBackdropPaint() {
   }
 }
 
-void SpaceNavigationView::UpdateSharedSidebarInk(bool dark) {
-  const auto update = [dark](views::View* view) {
-    if (auto* button = views::AsViewClass<SidebarButton>(view))
-      button->SetDark(dark);
-  };
-  for (const auto& row : favorites_body_->children()) {
-    for (const auto& button : row->children()) update(button);
+namespace {
+void SetSidebarTreeDark(views::View* view, bool dark) {
+  if (auto* tab = views::AsViewClass<TabRow>(view)) {
+    tab->SetDark(dark);
+  } else if (auto* button = views::AsViewClass<SidebarButton>(view)) {
+    button->SetDark(dark);
+  } else if (auto* label = views::AsViewClass<views::Label>(view)) {
+    label->SetEnabledColor(dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53));
+  } else {
+    for (const auto& child : view->children()) SetSidebarTreeDark(child, dark);
   }
-  for (const auto& button : dock_->children()) update(button);
+}
+}  // namespace
+
+void SpaceNavigationView::UpdateSidebarInk(bool dark) {
+  const std::array<views::View*, 6> trees = {
+      favorites_body_.get(), dock_.get(), space_header_.get(),
+      space_body_.get(), swipe_preview_title_.get(), swipe_preview_.get()};
+  for (auto* view : trees) {
+    if (view) SetSidebarTreeDark(view, dark);
+  }
   UpdateFrameButtonInk(dark);
 }
 
@@ -2133,7 +2185,7 @@ void SpaceNavigationView::OnSpaceTransitionFinished(unsigned generation) {
     ++transition_generation_;
     space_body_->layer()->GetAnimator()->StopAnimating();
     space_header_->layer()->GetAnimator()->StopAnimating();
-    // The incoming preview covers the viewport until the live rows take over.
+    // The translated preview stays visible until the live rows take over.
     base::AutoReset<int> gesture(&gesture_direction_override_, direction);
     SelectSpace(target, /*animate=*/false);
     Refresh();
@@ -2145,7 +2197,7 @@ void SpaceNavigationView::OnSpaceTransitionFinished(unsigned generation) {
     }
   }
   RemoveSwipePreview();
-  SetSwipeBackdropColor(std::nullopt);
+  SetSwipeBackdrop(std::nullopt);
   if (space_body_) space_body_->SetCanProcessEventsWithinSubtree(true);
   if (space_header_) space_header_->SetCanProcessEventsWithinSubtree(true);
   if (std::exchange(refresh_after_transition_, false)) ScheduleRefresh();
@@ -2240,7 +2292,7 @@ void SpaceNavigationView::PreviewSpaceSwipe(float offset) {
   }
   if (!has_neighbour || shift == 0.f) {
     RemoveSwipePreview();
-    SetSwipeBackdropColor(std::nullopt);
+    SetSwipeBackdrop(std::nullopt);
     return;
   }
   const auto adjacent =
@@ -2250,7 +2302,7 @@ void SpaceNavigationView::PreviewSpaceSwipe(float offset) {
     auto* viewport = body_->parent();
     const auto visible = space_scroll_->GetVisibleRect();
     if (adjacent.empty() || visible.IsEmpty()) {
-      SetSwipeBackdropColor(std::nullopt);
+      SetSwipeBackdrop(std::nullopt);
       return;
     }
     const float saved_offset = SpaceScrollOffset(adjacent);
@@ -2270,16 +2322,17 @@ void SpaceNavigationView::PreviewSpaceSwipe(float offset) {
     rows->SetBounds(space_body_->x() - visible.x(), layout_y, rows_width,
                     rows_height);
     rows->layer()->SetTransform(gfx::Transform::MakeTranslation(0, y - layout_y));
-    const SidebarPalette destination{SidebarColorFor(adjacent), HasPrideBackdrop()};
-    auto make_preview = [this, destination](const gfx::Rect& bounds) {
+    auto make_preview = [](const gfx::Rect& bounds) {
       auto preview = std::make_unique<views::View>();
       preview->SetCanProcessEventsWithinSubtree(false);
       preview->GetViewAccessibility().SetIsLeaf(true);
       preview->GetViewAccessibility().SetIsIgnored(true);
       preview->SetPaintToLayer();
+      // Move the rows over the same backdrop as the rest of the rail. An
+      // opaque preview paints a moving seam across both lists and titles.
+      preview->layer()->SetFillsBoundsOpaquely(false);
       preview->layer()->SetMasksToBounds(true);
       preview->SetBoundsRect(bounds);
-      preview->SetBackground(std::make_unique<SidebarBackdrop>(this, destination));
       return preview;
     };
     auto preview = make_preview(gfx::Rect(width, visible.height()));
@@ -2294,13 +2347,20 @@ void SpaceNavigationView::PreviewSpaceSwipe(float offset) {
     swipe_preview_title_ = title_clip_->AddChildView(std::move(title_preview));
     swipe_preview_title_->DeprecatedLayoutImmediately();
     swipe_preview_space_id_ = adjacent;
+    const bool dark = color_utils::IsDark(SidebarBackdropColor());
+    if (dark != color_utils::IsDark(SidebarColorFor(adjacent))) {
+      SetSidebarTreeDark(swipe_preview_, dark);
+      SetSidebarTreeDark(swipe_preview_title_, dark);
+    }
   }
   gfx::Transform entrance;
   entrance.Translate(shift + std::copysign(width, -shift), 0);
   swipe_preview_->layer()->SetTransform(entrance);
   swipe_preview_title_->layer()->SetTransform(entrance);
-  SetSwipeBackdropColor(gfx::Tween::ColorValueBetween(
-      std::abs(shift) / width, SidebarColor(), SidebarColorFor(adjacent)));
+  const bool pride = HasPrideBackdrop();
+  SetSwipeBackdrop(BlendSidebarBackdrops(
+      MakeSidebarBackdrop(SidebarColor(), pride),
+      MakeSidebarBackdrop(SidebarColorFor(adjacent), pride), std::abs(shift) / width));
 }
 void SpaceNavigationView::CompleteSpaceSwipe(float offset, bool flick) {
   const bool had_preview = std::exchange(swipe_preview_active_, false);
@@ -2319,8 +2379,8 @@ void SpaceNavigationView::CompleteSpaceSwipe(float offset, bool flick) {
       space_body_->SetCanProcessEventsWithinSubtree(false);
       space_header_->SetCanProcessEventsWithinSubtree(false);
       swipe_backdrop_animation_ = std::make_unique<SwipeBackdropAnimation>(
-          *this, kSwipeEntryDuration, SidebarBackdropColor(),
-          SidebarColorFor(swipe_preview_space_id_));
+          *this, kSwipeEntryDuration, BackdropColors(),
+          MakeSidebarBackdrop(SidebarColorFor(swipe_preview_space_id_), HasPrideBackdrop()));
       AnimateSpaceLayers(kSwipeEntryDuration, std::copysign(width, offset),
                          0.f, /*commit_swipe=*/true);
       return;
@@ -2330,9 +2390,10 @@ void SpaceNavigationView::CompleteSpaceSwipe(float offset, bool flick) {
     return;
   }
   if (had_preview && CanAnimateSpace()) {
-    if (swipe_backdrop_color_ && *swipe_backdrop_color_ != SidebarColor()) {
+    if (swipe_backdrop_ && *swipe_backdrop_ != MakeSidebarBackdrop(SidebarColor(), HasPrideBackdrop())) {
       swipe_backdrop_animation_ = std::make_unique<SwipeBackdropAnimation>(
-          *this, kSwipeReturnDuration, SidebarBackdropColor(), SidebarColor());
+          *this, kSwipeReturnDuration, BackdropColors(),
+          MakeSidebarBackdrop(SidebarColor(), HasPrideBackdrop()));
     }
     AnimateSpaceLayers(kSwipeReturnDuration, 0,
         swipe_preview_ ? std::optional<float>(std::copysign(width, -offset))
@@ -3902,10 +3963,10 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     view->GetBackground()->Paint(&sample, view);
     return sample.GetBitmap().getColor(0, 0);
   };
-  expect("the incoming dark Space paints its own title and list backdrops",
+  expect("the incoming title and rows have transparent backgrounds",
          !animate || (swipe_preview_ && swipe_preview_title_ &&
-             painted_backdrop(swipe_preview_) == 0xff35333f &&
-             painted_backdrop(swipe_preview_title_) == 0xff35333f));
+             !swipe_preview_->GetBackground() &&
+             !swipe_preview_title_->GetBackground()));
   expect("the shared sidebar starts changing color before the Space switches",
          !animate || (painted_backdrop(this) == gfx::Tween::ColorValueBetween(
              21.f / body_->parent()->width(), 0xffccddf2, 0xff35333f) &&
@@ -3931,10 +3992,18 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     // Sample the actual window compositor. Painting the Background on a
     // scratch Canvas cannot detect stale textures in other Views layers.
     const auto rail = views::View::ConvertRectToTarget(this, root, GetLocalBounds());
+    const auto list_bounds = views::View::ConvertRectToTarget(
+        body_->parent(), root, body_->parent()->GetLocalBounds());
+    const int left_seam = list_bounds.x() + std::lround(list_bounds.width() * 0.65f);
+    const int right_seam = list_bounds.x() + std::lround(list_bounds.width() * 0.35f);
     const std::array probes = {
         gfx::Point(rail.x() + 18, std::max(12, rail.y() / 2)),
         gfx::Point(rail.x() + 18, rail.y() + 4),
         gfx::Point(rail.x() + 4, rail.bottom() - 12),
+        gfx::Point(left_seam - 5, list_bounds.bottom() - 10),
+        gfx::Point(left_seam + 5, list_bounds.bottom() - 10),
+        gfx::Point(right_seam - 5, list_bounds.bottom() - 10),
+        gfx::Point(right_seam + 5, list_bounds.bottom() - 10),
     };
     const auto capture = [&] {
       std::array<SkColor, probes.size()> colors{};
@@ -3943,8 +4012,8 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
           std::make_unique<viz::CopyOutputRequest>(
               viz::CopyOutputRequest::ResultFormat::RGBA,
               viz::CopyOutputRequest::ResultDestination::kSystemMemory,
-              base::BindOnce([](std::array<SkColor, 3>* colors,
-                                std::array<gfx::Point, 3> probes,
+              base::BindOnce([](std::array<SkColor, 7>* colors,
+                                std::array<gfx::Point, 7> probes,
                                 gfx::Size root_size, base::OnceClosure done,
                                 std::unique_ptr<viz::CopyOutputResult> result) {
                 const auto pixels = result->ScopedAccessSkBitmap();
@@ -3977,6 +4046,13 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     expect("composited frame, upper sidebar and footer change during the held swipe",
            active_space_id_ == a && visibly_changed(0) && visibly_changed(1) &&
                visibly_changed(2));
+    expect("the composited left swipe has no vertical background seam",
+           dragging[3] == dragging[4] && dragging[3] == dragging[2]);
+    PreviewSpaceSwipe(body_->parent()->width() * 0.35f);
+    const auto reversed_colors = capture();
+    expect("the composited right swipe has no vertical background seam",
+           reversed_colors[5] == reversed_colors[6] &&
+               reversed_colors[5] == reversed_colors[2]);
     FinishSpaceTransition();
     const auto cancelled = capture();
     expect("all three composited rails return to their initial colors on cancellation",
@@ -4037,6 +4113,23 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   expect("Pride keeps the selected yellow and adds spectrum at both fixed ends",
          SidebarColor() == 0xfff0d763 && pride_colors[0] != pride_colors[1] &&
          pride_colors[2] != pride_colors[3] && pride_colors[0] != atrium_colors[0]);
+  const auto yellow = BackdropColors();
+  const auto blue = MakeSidebarBackdrop(0xff5569b6, true);
+  const auto charcoal = MakeSidebarBackdrop(0xff37313e, true);
+  const auto hue = [](SkColor color) {
+    color_utils::HSL hsl;
+    color_utils::SkColorToHSL(color, &hsl);
+    return hsl.h * 360;
+  };
+  expect("Pride derives warm and cool gradients from their respective base hues",
+         yellow.stops[2] == 0xfff0d763 && blue.stops[2] == 0xff5569b6 &&
+             hue(yellow.stops.front()) < hue(yellow.base) &&
+             hue(yellow.stops.back()) > hue(yellow.base) &&
+             hue(blue.stops.front()) < hue(blue.base) &&
+             hue(blue.stops.back()) > hue(blue.base) &&
+             std::ranges::all_of(charcoal.stops, [](SkColor color) {
+               return color_utils::GetContrastRatio(SK_ColorWHITE, color) >= 4.5f;
+             }));
   ws.SetSpaceColor(a, original_color);
   workspace_->SetEdition(original_edition);
 

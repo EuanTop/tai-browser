@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #ifndef SIDEBAR_BROWSER_SPACE_NAVIGATION_VIEW_H_
 #define SIDEBAR_BROWSER_SPACE_NAVIGATION_VIEW_H_
+#include <array>
 #include <deque>
 #include <map>
 #include <memory>
@@ -56,6 +57,11 @@ GURL ProductNewTabURL(BrowserWindowInterface*);
 class WorkspaceState;
 class FolderRevealView;
 struct SavedItem;
+struct SidebarBackdropColors {
+  SkColor base;
+  std::array<SkColor, 5> stops;
+  bool operator==(const SidebarBackdropColors&) const = default;
+};
 class SpaceNavigationView final : public views::BoxLayoutView,
                                   public TabStripModelObserver,
                                   public views::ContextMenuController,
@@ -76,6 +82,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void OnThemeChanged() override;
   SkColor SidebarColor() const;
   SkColor SidebarBackdropColor() const;
+  SidebarBackdropColors BackdropColors() const;
   ui::ColorProviderKey::InitializerSupplier& GlobalSearchPalette() const;
   bool HasPrideBackdrop() const;
   bool IsDark() const;
@@ -165,9 +172,9 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void ShowAppearance();
   void UpdateFrameButton();
   SkColor SidebarColorFor(const std::string& space_id) const;
-  void SetSwipeBackdropColor(std::optional<SkColor> color);
+  void SetSwipeBackdrop(std::optional<SidebarBackdropColors> colors);
   void ScheduleSidebarBackdropPaint();
-  void UpdateSharedSidebarInk(bool dark);
+  void UpdateSidebarInk(bool dark);
   void UpdateFrameButtonInk(bool dark);
   void SchedulePageChromeRefresh();
   void RefreshPageChrome();
@@ -250,7 +257,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   std::string swipe_preview_space_id_;
   class SwipeBackdropAnimation;
   std::unique_ptr<SwipeBackdropAnimation> swipe_backdrop_animation_;
-  std::optional<SkColor> swipe_backdrop_color_;
+  std::optional<SidebarBackdropColors> swipe_backdrop_;
   // This window's positions are discarded when the sidebar is destroyed.
   std::map<std::string, float> space_scroll_offsets_;
   std::string rendered_space_id_;
