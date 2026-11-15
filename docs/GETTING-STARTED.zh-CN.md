@@ -16,6 +16,8 @@ macOS 下，**⌘T** 新建标签、**⌘L** 聚焦地址栏，默认 **⌘S** �
 
 在 **TAi 设置 → 外观 → 界面语言**中选择「跟随系统」「简体中文」或「English」，TAi 自有界面会立即切换。Chromium 原生设置、历史记录和扩展程序页面使用 macOS 分配给 TAi 的应用语言。要把这些页面切成简体中文，请在 **macOS 系统设置 → 通用 → 语言与地区 → 应用程序**中为 **TAi Browser** 选「简体中文」，然后重启 TAi。[Apple 的按应用设置语言说明](https://support.apple.com/zh-cn/guide/mac-help/mh26684/mac)
 
+完成欢迎流程后，如果 macOS 的默认浏览器是其他应用，TAi 会在地址栏下方提示。点击「设为默认」后在 macOS 中确认，也可以关闭提示继续浏览。
+
 可通过 **TAi 设置 → 浏览器 → 默认浏览器**，点击「设为默认」后在 macOS 中确认。TAi 设置里的专用入口已加入开发版。在 Alpha 1 中，可打开 **macOS 系统设置 → 桌面与程序坞 → 默认网页浏览器**，选择 **TAi Browser**。[Apple 的说明](https://support.apple.com/en-ie/102362)
 
 ## 连接 Agent

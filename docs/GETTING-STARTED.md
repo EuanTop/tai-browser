@@ -16,6 +16,8 @@ On macOS, **⌘T** opens a tab, **⌘L** focuses the address bar, and the defaul
 
 In **TAi Settings → Appearance → Interface language**, choose **Follow system**, **English** or **简体中文** for TAi’s interface. Changes apply immediately. Chromium’s Settings, History and Extensions use the macOS application language. To change those pages, choose a language for **TAi Browser** in **macOS System Settings → General → Language & Region → Applications**, then relaunch TAi. [Apple’s per-app language guide](https://support.apple.com/guide/mac-help/change-the-system-language-mh26684/mac)
 
+After the welcome card, TAi may show a banner below the address bar if another browser is the macOS default. Choose **Set as default** and confirm in macOS, or close the banner to keep browsing.
+
 To set TAi as the default browser, choose **TAi Settings → Browser → Default browser**, then use **Make default** and confirm in macOS. The dedicated TAi Settings row is available in development builds. In Alpha 1, open **macOS System Settings → Desktop & Dock → Default web browser** and choose **TAi Browser**. [Apple’s guide](https://support.apple.com/en-ie/102362)
 
 ## Connect an agent
