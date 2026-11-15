@@ -78,6 +78,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   ~SpaceNavigationView() override;
   void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
   void ToggleSidebar();
+  bool CanRemoveCurrentSpace() const;
   const std::string& active_space_id() const { return active_space_id_; }
   void OnThemeChanged() override;
   SkColor SidebarColor() const;
@@ -170,7 +171,9 @@ class SpaceNavigationView final : public views::BoxLayoutView,
                  DropLocation destination);
   void RegisterRow(views::View*, std::string key, Area area);
   void ClearDropFeedback();
-  void ShowAppearance();
+  void ShowAppearance(const std::string& id);
+  void ConfirmRemoveSpace(const std::string& id);
+  void RemoveSpaceAndMoveContents(std::string id, std::string destination);
   void UpdateFrameButton();
   SkColor SidebarColorFor(const std::string& space_id) const;
   void SetSwipeBackdrop(std::optional<SidebarBackdropColors> colors);
@@ -208,6 +211,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   tabs::TabInterface* ReusableHomePlaceholder(tabs::TabInterface* preferred);
   void CreateSpace();
   void OpenSettings();
+  void OpenSpaceSettings(const std::string& id);
   void NewTab(bool placeholder = false);
   void CloseTab(tabs::TabHandle handle);
   void ClearTemporary();
@@ -240,6 +244,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void BeginRename(std::string id, bool space);
   void CommitRename();
   void ShowSpaceMenu();
+  void PrepareContextMenu(std::string key, std::string space_id = {});
   void BuildFolderMenu(const SavedItem& folder);
   std::vector<tabs::TabHandle> FolderOpenTabs(const SavedItem& folder) const;
   void ShowSpaceChooser();
@@ -316,6 +321,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   std::string edit_id_;
   bool edit_space_ = false;
   std::string menu_item_;
+  std::string menu_space_;
   bool refresh_pending_ = false;
   bool collapsed_ = false;
   bool switching_ = false;

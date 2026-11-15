@@ -130,6 +130,16 @@ NSImage* SpaceSymbolImage(const char* name) {
   add("新建 Space", "New Space", @"new_space", ready);
   add("上一个 Space", "Previous Space", @"previous_space", multiple);
   add("下一个 Space", "Next Space", @"next_space", multiple);
+  add("查看所有 Space", "All Spaces…", @"all_spaces", ready);
+  if (ready) {
+    [menu addItem:[NSMenuItem separatorItem]];
+    const bool editable = !workspace->load_error();
+    add("重命名 Space…", "Rename Space…", @"rename_space", editable);
+    add("更改 Space 颜色", "Change Space Color", @"color_space", editable);
+    add("更改 Space 图标…", "Change Space Icon…", @"icon_space",
+        editable && !profile->IsOffTheRecord());
+    add("删除 Space…", "Delete Space…", @"remove_space", navigation->CanRemoveCurrentSpace());
+  }
   if (!ready || workspace->model().spaces().empty()) return;
 
   [menu addItem:[NSMenuItem separatorItem]];

@@ -57,5 +57,14 @@ int main() {
   Check(roundtrip.FindSpace("a")->icon == "👩🏽‍💻", "compound emoji survives restoration");
   auto legacy = model.CaptureSnapshot(); for (auto& space : legacy.spaces) space.icon.clear();
   Check(roundtrip.RestoreSnapshot(legacy) && roundtrip.FindSpace("a")->icon == DefaultSpaceIcon(0) && roundtrip.FindSpace("b")->icon == DefaultSpaceIcon(1), "legacy Spaces acquire stable default emoji");
+  Check(!model.RemoveSpace("b", "other") && !model.RemoveSpace("b", "b"),
+        "deletion cannot cross profiles or remove the last destination");
+  Check(model.RemoveSpace("b", "a") && !model.FindSpace("b") &&
+        model.active_space_id() == "a" && model.FindItem("folder")->space_id == "a" &&
+        model.FindItem("nested")->parent_id == "folder" &&
+        model.FindItem("favorite")->space_id.empty(),
+        "deletion preserves the saved tree and global favorites");
+  Check(roundtrip.RestoreSnapshot(model.CaptureSnapshot()) &&
+        !roundtrip.FindSpace("b"), "Space deletion survives persistence");
   std::cout << "Workspace hierarchy, favorites and atomic restoration checks passed\n";
 }

@@ -18,6 +18,7 @@
 #include "chrome/browser/extensions/extension_url_overrides.h"
 #endif
 #include <algorithm>
+#include <iterator>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -92,6 +93,8 @@
 #include "chrome/browser/sessions/tab_restore_service_factory.h"
 #include "chrome/browser/ui/browser_live_tab_context.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/dialogs/browser_dialogs.h"
+#include "ui/base/models/dialog_model.h"
 #include "chrome/browser/ui/view_ids.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/navigator/browser_navigator.h"
@@ -163,10 +166,26 @@ constexpr float kSwipeEdgeGive = 40.f;
 constexpr auto kSwipeEntryDuration = base::Milliseconds(240);
 constexpr auto kSwipeReturnDuration = base::Milliseconds(180);
 constexpr int kRename = 1, kFolder = 2, kSave = 3, kFavorite = 4,
-              kRemove = 5, kClose = 6, kNewSpace = 7, kMoveRoot = 8, kAppearance = 9, kNewWindow = 10, kSettings = 11, kSpaceIcon = 12,
+              kRemove = 5, kClose = 6, kNewSpace = 7, kMoveRoot = 8, kAppearance = 9, kNewWindow = 10, kSpaceIcon = 12,
               kToggleFolder = 13, kCloseFolderTabs = 14, kMoveFolderToSpace = 15,
-              kMoveFolderBase = 100, kSwitchSpaceBase = 100000,
-              kMoveFolderToSpaceBase = 200000;
+              kMoveFolderBase = 100,
+              kMoveFolderToSpaceBase = 200000, kAllSpaces = 17,
+              kRemoveSpace = 20, kPreviousSpace = 21, kNextSpace = 22;
+
+const WorkspaceSpace* SpaceRemovalTarget(const WorkspaceModel& model,
+                                         const std::string& id) {
+  const auto& spaces = model.spaces();
+  const auto source = std::ranges::find(spaces, id, &WorkspaceSpace::id);
+  if (source == spaces.end()) return nullptr;
+  const auto same_profile = [&](const WorkspaceSpace& space) {
+    return space.profile_key == source->profile_key;
+  };
+  const auto next = std::find_if(std::next(source), spaces.end(), same_profile);
+  if (next != spaces.end()) return &*next;
+  const auto preceding = std::find_if(std::make_reverse_iterator(source),
+                                      spaces.rend(), same_profile);
+  return preceding == spaces.rend() ? nullptr : &*preceding;
+}
 std::string NewId() { return base::Uuid::GenerateRandomV4().AsLowercaseString(); }
 // The pinned Chromium keeps 25 recently closed entries. Keep each clear below
 // that limit rather than silently claiming that an arbitrary batch is undoable.
@@ -1763,12 +1782,11 @@ void SpaceNavigationView::RefreshPageChrome() {
   GetWidget()->GetRootView()->SchedulePaint();
 }
 void SpaceNavigationView::OnThemeChanged() { views::BoxLayoutView::OnThemeChanged(); SchedulePageChromeRefresh(); ScheduleRefresh(); }
-void SpaceNavigationView::ShowAppearance() {
-  const auto id = active_space_id_;
+void SpaceNavigationView::ShowAppearance(const std::string& id) {
   const auto* space = workspace_->model().FindSpace(id); if (!space) return;
   appearance_widget_.reset(); appearance_delegate_.reset();
   appearance_delegate_ = std::make_unique<SpaceAppearanceBubble>(
-      browser_->GetProfile(), title_clip_,
+      browser_->GetProfile(), id == active_space_id_ ? title_clip_.get() : dock_.get(),
       base::UTF8ToUTF16(space->icon + "  " + space->name),
       SpaceColorHex(space->color), SidebarColorFor(std::string()),
       base::BindRepeating([](base::WeakPtr<SpaceNavigationView> self, std::string id, std::string color) {
@@ -2748,6 +2766,67 @@ GURL ProductNewTabURL(BrowserWindowInterface* browser) {
 #endif
   return GURL("chrome://tai/home.html");
 }
+bool SpaceNavigationView::CanRemoveCurrentSpace() const {
+  return model_ && workspace_->loaded() && !workspace_->load_error() &&
+         SpaceRemovalTarget(workspace_->model(), active_space_id_);
+}
+
+void SpaceNavigationView::ConfirmRemoveSpace(const std::string& id) {
+  if (!model_ || !workspace_->loaded() || workspace_->load_error()) return;
+  const auto& workspace = workspace_->model();
+  const auto* source = workspace.FindSpace(id);
+  const auto* target = SpaceRemovalTarget(workspace, id);
+  auto* contents = model_->GetActiveWebContents();
+  if (!source || !target || !contents) return;
+
+  auto* profile = browser_->GetProfile();
+  const auto title = LocalizedText16(profile, "删除 Space ", "Delete Space ") +
+                     base::UTF8ToUTF16(source->name) + u"?";
+  const bool chinese = LocalizedText(profile, "zh", "en") == "zh";
+  const auto destination = base::UTF8ToUTF16(target->name);
+  const auto description = chinese
+      ? u"已保存的网页、文件夹和打开的标签页将移到「" + destination + u"」。"
+      : u"Saved pages, folders, and open tabs will move to “" + destination + u"”.";
+  auto dialog = ui::DialogModel::Builder()
+      .SetTitle(title)
+      .AddParagraph(ui::DialogModelLabel(description))
+      .AddOkButton(base::BindOnce(&SpaceNavigationView::RemoveSpaceAndMoveContents,
+                                  weak_factory_.GetWeakPtr(), id, target->id),
+                   ui::DialogModel::Button::Params().SetLabel(
+                       LocalizedText16(profile, "删除 Space", "Delete Space")))
+      .AddCancelButton(base::DoNothing(), ui::DialogModel::Button::Params().SetLabel(
+                       LocalizedText16(profile, "取消", "Cancel")))
+      .OverrideDefaultButton(ui::mojom::DialogButton::kCancel)
+      .Build();
+  chrome::ShowTabModal(std::move(dialog), contents);
+}
+
+void SpaceNavigationView::RemoveSpaceAndMoveContents(std::string id,
+                                                     std::string destination) {
+  if (!model_ || !workspace_->loaded() || workspace_->load_error() ||
+      !workspace_->model().RemoveSpace(id, destination)) return;
+
+  // Move existing tab bindings before notifying other views of the new model.
+  for (auto* window : GetAllBrowserWindowInterfaces()) {
+    if (window->GetProfile() != browser_->GetProfile()) continue;
+    auto* view = From(window);
+    if (!view || !view->model_) continue;
+    for (int i = 0; i < view->model_->count(); ++i) {
+      auto* tab = view->model_->GetTabAtIndex(i);
+      const auto found = view->bindings_.find(tab->GetHandle().raw_value());
+      auto binding = found != view->bindings_.end()
+          ? std::optional(found->second) : ReadOrganization(tab->GetContents());
+      if (!binding || binding->space_id != id) continue;
+      binding->space_id = destination;
+      view->SetBinding(tab, std::move(*binding));
+    }
+    if (view->active_space_id_ == id) view->active_space_id_ = destination;
+    view->space_scroll_offsets_.erase(id);
+    view->last_active_.erase(id);
+  }
+  workspace_->Commit();
+}
+
 void SpaceNavigationView::CreateSpace() {
   if (!workspace_->loaded()) return;
   const auto id = NewId();
@@ -2772,6 +2851,11 @@ bool SpaceNavigationView::PerformShortcut(std::string_view action) {
   else if (action == "next_space") SwitchRelativeSpace(1);
   else if (action == "previous_space") SwitchRelativeSpace(-1);
   else if (action == "new_space") CreateSpace();
+  else if (action == "all_spaces") ShowSpaceChooser();
+  else if (action == "rename_space") BeginRename(active_space_id_, true);
+  else if (action == "color_space") ShowAppearance(active_space_id_);
+  else if (action == "icon_space") OpenSpaceSettings(active_space_id_);
+  else if (action == "remove_space") ConfirmRemoveSpace(active_space_id_);
   else if (action == "new_folder") NewFolder({});
   else if (action == "pin_tab") SaveCurrent({}, false);
   else if (action == "favorite_tab") SaveCurrent({}, true);
@@ -3273,6 +3357,7 @@ std::unique_ptr<views::BoxLayoutView> SpaceNavigationView::BuildSpaceHeader(
     auto* menu = header->AddChildView(IconButton(
         base::BindRepeating(&SpaceNavigationView::ShowSpaceMenu, base::Unretained(this)), kMoreVertIcon, dark, 18));
     menu->SetTooltipText(LocalizedText16(browser_->GetProfile(), "Space 设置", "Space settings")); menu->SetPreferredSize(gfx::Size(28, 28));
+    if (interactive) menu->set_context_menu_controller(this);
   }
   return header;
 }
@@ -3540,6 +3625,7 @@ void SpaceNavigationView::Render(RenderState state) {
         : base::BindRepeating(&SpaceNavigationView::ActivateSpace, weak_factory_.GetWeakPtr(), entry.id);
     auto* dot = dock_->AddChildView(std::make_unique<SpaceDockButton>(
         std::move(action), base::UTF8ToUTF16(entry.icon), selected, compact && !selected, dark));
+    dot->set_context_menu_controller(this);
     dot->SetTooltipText(base::UTF8ToUTF16(entry.name));
     dot->GetViewAccessibility().SetName(base::UTF8ToUTF16(entry.name));
     dot->GetViewAccessibility().SetIsSelected(selected);
@@ -3567,9 +3653,12 @@ void SpaceNavigationView::Render(RenderState state) {
   }
 }
 void SpaceNavigationView::OpenSettings() {
+  OpenSpaceSettings(active_space_id_);
+}
+void SpaceNavigationView::OpenSpaceSettings(const std::string& id) {
   if (!browser_ || browser_->GetProfile()->IsOffTheRecord()) return;
   NavigateParams params(browser_, GURL("chrome://tai/?space=" +
-      base::EscapeQueryParamValue(active_space_id_, true)), ui::PAGE_TRANSITION_AUTO_BOOKMARK);
+      base::EscapeQueryParamValue(id, true)), ui::PAGE_TRANSITION_AUTO_BOOKMARK);
   params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
   Navigate(&params);
 }
@@ -3607,15 +3696,36 @@ void SpaceNavigationView::ShowSpaceChooser() {
 void SpaceNavigationView::ShowContextMenuForViewImpl(
     views::View* source, const gfx::Point& point, ui::mojom::MenuSourceType type) {
   if (!workspace_->loaded() || !model_ || (menu_runner_ && menu_runner_->IsRunning())) return;
-  menu_item_ = row_items_.contains(source) ? row_items_[source] : std::string();
+  const auto row = row_items_.find(source);
+  const auto dot = std::ranges::find_if(drop_zones_, [source](const auto& zone) {
+    return zone.view == source && zone.area == Area::kSpace;
+  });
+  PrepareContextMenu(row == row_items_.end() ? std::string() : row->second,
+                     dot == drop_zones_.end() ? active_space_id_ : dot->space);
+  if (!menu_model_->GetItemCount()) return;
+  menu_runner_ = std::make_unique<views::MenuRunner>(menu_model_.get(), views::MenuRunner::CONTEXT_MENU);
+  menu_runner_->RunMenuAt(GetWidget(), nullptr, gfx::Rect(point, gfx::Size()),
+                           views::MenuAnchorPosition::kTopLeft, type);
+}
+
+void SpaceNavigationView::PrepareContextMenu(std::string key,
+                                             std::string space_id) {
   menu_runner_.reset();
-  menu_model_ = std::make_unique<ui::SimpleMenuModel>(this);
+  menu_model_.reset();
   folder_move_menu_.reset();
   folder_menu_destinations_.clear();
-  auto* item = workspace_->model().FindItem(menu_item_);
+  menu_item_ = std::move(key);
+  menu_space_ = space_id.empty() ? active_space_id_ : std::move(space_id);
+  menu_model_ = std::make_unique<ui::SimpleMenuModel>(this);
+  const auto* item = workspace_->model().FindItem(menu_item_);
   if (item && item->kind == SavedKind::kFolder) {
     BuildFolderMenu(*item);
-  } else {
+    return;
+  }
+  const auto label = [this](std::string_view zh, std::string_view en) {
+    return LocalizedText16(browser_->GetProfile(), zh, en);
+  };
+  if (!menu_item_.empty()) {
     menu_model_->AddItem(kRename, item ? LocalizedText16(browser_->GetProfile(), "重命名", "Rename") : LocalizedText16(browser_->GetProfile(), "重命名 Space", "Rename Space"));
     menu_model_->AddItem(kFolder, LocalizedText16(browser_->GetProfile(), "新建文件夹", "New folder"));
     menu_model_->AddItem(kSave, LocalizedText16(browser_->GetProfile(), "收藏当前页面", "Pin current page"));
@@ -3635,21 +3745,25 @@ void SpaceNavigationView::ShowContextMenuForViewImpl(
         }
       }
     }
-    menu_model_->AddItem(kAppearance, LocalizedText16(browser_->GetProfile(), "更改 Space 颜色", "Change Space color"));
-    menu_model_->AddItem(kSpaceIcon, LocalizedText16(browser_->GetProfile(), "更改 Space 图标…", "Change Space icon…"));
-    if (item || menu_item_.starts_with("@tab:")) menu_model_->AddItem(kNewWindow, LocalizedText16(browser_->GetProfile(), "移到新窗口", "Move to new window"));
-    menu_model_->AddItem(kNewSpace, LocalizedText16(browser_->GetProfile(), "新建 Space", "New Space"));
-    menu_model_->AddItem(kSettings, LocalizedText16(browser_->GetProfile(), "TAi 设置", "TAi settings"));
-    menu_model_->AddSeparator(ui::NORMAL_SEPARATOR);
-    int space_index = 0;
-    for (const auto& space : workspace_->model().spaces()) {
-      menu_model_->AddItem(kSwitchSpaceBase + space_index++, LocalizedText16(browser_->GetProfile(), "切换到 ", "Switch to ") + base::UTF8ToUTF16(space.icon + " " + space.name));
-    }
+    menu_model_->AddItem(kNewWindow, label("移到新窗口", "Move to New Window"));
+    return;
   }
-  menu_runner_ = std::make_unique<views::MenuRunner>(menu_model_.get(), views::MenuRunner::CONTEXT_MENU);
-  menu_runner_->RunMenuAt(GetWidget(), nullptr, gfx::Rect(point, gfx::Size()),
-                           views::MenuAnchorPosition::kTopLeft, type);
-  ScheduleRefresh();
+  if (!workspace_->model().FindSpace(menu_space_)) return;
+  menu_model_->AddItem(kRename, label("重命名 Space…", "Rename Space…"));
+  menu_model_->AddItem(kAppearance, label("更改 Space 颜色", "Change Space Color"));
+  if (IsCommandIdEnabled(kSpaceIcon))
+    menu_model_->AddItem(kSpaceIcon, label("更改 Space 图标…", "Change Space Icon…"));
+  menu_model_->AddItem(kRemoveSpace, label("删除 Space…", "Delete Space…"));
+  menu_model_->AddSeparator(ui::NORMAL_SEPARATOR);
+  if (menu_space_ == active_space_id_) {
+    menu_model_->AddItem(kFolder, label("新建文件夹", "New Folder"));
+    if (IsCommandIdEnabled(kSave))
+      menu_model_->AddItem(kSave, label("固定当前页面", "Pin Current Page"));
+  }
+  menu_model_->AddItem(kAllSpaces, label("查看所有 Space", "All Spaces…"));
+  menu_model_->AddItem(kNewSpace, label("新建 Space", "New Space"));
+  menu_model_->AddItem(kPreviousSpace, label("上一个 Space", "Previous Space"));
+  menu_model_->AddItem(kNextSpace, label("下一个 Space", "Next Space"));
 }
 
 void SpaceNavigationView::BuildFolderMenu(const SavedItem& folder) {
@@ -3712,7 +3826,11 @@ std::vector<tabs::TabHandle> SpaceNavigationView::FolderOpenTabs(
 
 bool SpaceNavigationView::IsCommandIdEnabled(int command) const {
   const auto* item = workspace_->model().FindItem(menu_item_);
-  if (command == kSettings || command == kSpaceIcon) return !browser_->GetProfile()->IsOffTheRecord();
+  if (command == kSpaceIcon) return !browser_->GetProfile()->IsOffTheRecord();
+  if (command == kRemoveSpace)
+    return !workspace_->load_error() && SpaceRemovalTarget(workspace_->model(), menu_space_);
+  if (command == kPreviousSpace || command == kNextSpace)
+    return workspace_->model().spaces().size() > 1;
   if (command == kNewWindow && item && item->kind == SavedKind::kFolder) return false;
   if (command == kRename) return !menu_item_.starts_with("@tab:");
   if (command == kClose && item) return LiveItem(item->id).has_value();
@@ -3728,7 +3846,14 @@ bool SpaceNavigationView::IsCommandIdEnabled(int command) const {
 void SpaceNavigationView::ExecuteCommand(int command, int) {
   auto* item = workspace_->model().FindItem(menu_item_);
   const auto parent = item && item->kind == SavedKind::kFolder ? item->id : std::string();
-  if (command == kRename) BeginRename(item ? item->id : active_space_id_, !item);
+  if (!model_ || !workspace_->model().FindSpace(menu_space_) ||
+      (!menu_item_.empty() && menu_space_ != active_space_id_) ||
+      ((command == kFolder || command == kSave) && menu_space_ != active_space_id_) ||
+      !IsCommandIdEnabled(command)) return;
+  if (command == kRename) {
+    if (!item && menu_space_ != active_space_id_) ActivateSpace(menu_space_);
+    BeginRename(item ? item->id : menu_space_, !item);
+  }
   else if (command == kFolder) NewFolder(parent);
   else if (command == kToggleFolder && !parent.empty()) {
     OpenItem(parent);
@@ -3745,9 +3870,12 @@ void SpaceNavigationView::ExecuteCommand(int command, int) {
   else if (command == kSave) SaveCurrent(parent, false);
   else if (command == kFavorite) SaveCurrent({}, true);
   else if (command == kNewSpace) CreateSpace();
-  else if (command == kSettings) OpenSettings();
-  else if (command == kSpaceIcon) OpenSettings();
-  else if (command == kAppearance) ShowAppearance();
+  else if (command == kAllSpaces) ShowSpaceChooser();
+  else if (command == kPreviousSpace) SwitchRelativeSpace(-1);
+  else if (command == kNextSpace) SwitchRelativeSpace(1);
+  else if (command == kSpaceIcon) OpenSpaceSettings(menu_space_);
+  else if (command == kAppearance) ShowAppearance(menu_space_);
+  else if (command == kRemoveSpace) ConfirmRemoveSpace(menu_space_);
   else if (command == kNewWindow) {
     std::optional<tabs::TabHandle> handle;
     if (item) { OpenItem(item->id); handle = LiveItem(item->id); }
@@ -3765,10 +3893,6 @@ void SpaceNavigationView::ExecuteCommand(int command, int) {
       const auto destination = folder_menu_destinations_[index];
       ApplyDrop(this, parent, {Area::kSaved, destination, {}, {}, 0, nullptr});
     }
-  } else if (command >= kSwitchSpaceBase) {
-    const int index = command - kSwitchSpaceBase;
-    const auto& spaces = workspace_->model().spaces();
-    if (index < static_cast<int>(spaces.size())) ActivateSpace(spaces[index].id);
   }
   else if (command == kRemove && item) {
     workspace_->model().RemoveItem(item->id); workspace_->Commit();
@@ -4796,9 +4920,7 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   ws.AddItem({reveal_child, active_space_id_, reveal_folder, "Reveal child",
               "https://example.invalid/reveal", SavedKind::kPage});
   {
-    base::AutoReset<std::string> menu_item(&menu_item_, reveal_folder);
-    menu_model_ = std::make_unique<ui::SimpleMenuModel>(this);
-    BuildFolderMenu(*ws.FindItem(reveal_folder));
+    PrepareContextMenu(reveal_folder);
     expect("folder menu contains folder actions and an independent Move to Space submenu",
         menu_model_->GetIndexOfCommandId(kRename).has_value() &&
         menu_model_->GetIndexOfCommandId(kToggleFolder).has_value() &&
@@ -4806,10 +4928,12 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
         !menu_model_->GetIndexOfCommandId(kCloseFolderTabs) &&
         !menu_model_->GetIndexOfCommandId(kClose) &&
         !menu_model_->GetIndexOfCommandId(kAppearance) &&
-        !menu_model_->GetIndexOfCommandId(kSwitchSpaceBase));
-    menu_model_.reset();
-    folder_move_menu_.reset();
-    folder_menu_destinations_.clear();
+        !menu_model_->GetIndexOfCommandId(kRemoveSpace));
+    PrepareContextMenu({});
+    expect("blank sidebar can manage its Space",
+        menu_model_->GetIndexOfCommandId(kAppearance).has_value() &&
+        menu_model_->GetIndexOfCommandId(kRemoveSpace).has_value() &&
+        menu_model_->GetIndexOfCommandId(kAllSpaces).has_value());
   }
   // Let queued tab and theme notifications from the preceding navigation run.
   wait_for([&] { return !refresh_pending_; });
@@ -4923,6 +5047,29 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   ws.AddItem({numbered_page, mru_space, {}, "Closed pinned page", "https://example.invalid/numbered", SavedKind::kPage});
   SelectNumberedTab(0);
   expect("numbered shortcuts can open a closed pinned sidebar page", LiveItem(numbered_page) && model_->GetActiveTab() == LiveItem(numbered_page)->Get());
+  const auto removed_space = NewId();
+  ws.AddSpace({removed_space, "Space to remove", "current-profile"});
+  const auto preserved_folder = NewId();
+  ws.AddItem({preserved_folder, removed_space, {}, "Saved folder", {}, SavedKind::kFolder});
+  const auto preserved_pin = NewId();
+  ws.AddItem({preserved_pin, removed_space, preserved_folder, "Saved pin",
+              "https://example.invalid/preserved", SavedKind::kPage});
+  PrepareContextMenu({}, removed_space);
+  expect("a background Space icon configures its own Space without selecting it",
+      menu_space_ == removed_space && active_space_id_ == mru_space &&
+      menu_model_->GetIndexOfCommandId(kAppearance).has_value() &&
+      IsCommandIdEnabled(kRemoveSpace));
+  ActivateSpace(removed_space);
+  NewTab();
+  const auto preserved_tab = model_->GetActiveTab()->GetHandle();
+  RemoveSpaceAndMoveContents(removed_space, mru_space);
+  expect("deleting a Space moves its live tabs and saved folder tree together",
+      !ws.FindSpace(removed_space) && active_space_id_ == mru_space &&
+      bindings_.at(preserved_tab.raw_value()).space_id == mru_space &&
+      model_->GetActiveTab() == preserved_tab.Get() &&
+      ws.FindItem(preserved_folder)->space_id == mru_space &&
+      ws.FindItem(preserved_pin)->parent_id == preserved_folder);
+  model_->ActivateTab(LiveItem(numbered_page)->Get());
   workspace_->SetShortcutOverrides(old_overrides.Clone());
   {
     const auto empty_one = NewId(), empty_two = NewId(), empty_three = NewId();

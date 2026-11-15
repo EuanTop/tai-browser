@@ -108,6 +108,23 @@ bool WorkspaceModel::ActivateSpace(const std::string& id) {
   return true;
 }
 
+bool WorkspaceModel::RemoveSpace(std::string id,
+                                 const std::string& destination) {
+  const auto* source = FindSpace(id);
+  const auto* target = FindSpace(destination);
+  if (!source || !target || id == destination ||
+      source->profile_key != target->profile_key) return false;
+
+  for (auto& item : state_.items) {
+    if (item.space_id == id) item.space_id = destination;
+  }
+  if (state_.active_space_id == id) state_.active_space_id = destination;
+  std::erase_if(state_.spaces, [&](const WorkspaceSpace& space) {
+    return space.id == id;
+  });
+  return true;
+}
+
 bool WorkspaceModel::RenameSpace(const std::string& id, std::string name) {
   for (auto& space : state_.spaces) {
     if (space.id == id) { space.name = std::move(name); return true; }
