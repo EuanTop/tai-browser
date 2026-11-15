@@ -266,29 +266,6 @@ int CommandForItem(NSMenuItem* item) {
   return 0;
 }
 
-void UpdateDockIcon(Profile* profile) {
-  const auto* workspace = WorkspaceState::ForProfile(profile);
-  if (!workspace->loaded()) return;
-  static bool pride_applied = false;
-  const bool pride = workspace->edition() == "pride";
-  if (pride == pride_applied) return;
-  if (!pride) {
-    [NSApp setApplicationIconImage:nil];
-    pride_applied = false;
-    return;
-  }
-  static NSImage* const pride_icon = []() -> NSImage* {
-    std::string bytes;
-    if (!base::Base64Decode(brand_resources::kPrideIcon, &bytes)) return nil;
-    return [[NSImage alloc]
-        initWithData:[NSData dataWithBytes:bytes.data() length:bytes.size()]];
-  }();
-  if (pride_icon) {
-    [NSApp setApplicationIconImage:pride_icon];
-    pride_applied = true;
-  }
-}
-
 void UpdateItems(NSMenu* menu, BrowserWindowInterface* browser,
                  std::string_view language) {
   for (NSMenuItem* item in menu.itemArray) {
@@ -411,10 +388,7 @@ void UpdateShortcutMenu(BrowserWindowInterface* browser) {
     if (!view || !view->GetWidget() || !view->GetWidget()->IsActive()) return;
     if (!SpaceNavigationView::From(browser)) browser = nullptr;
   }
-  if (browser) {
-    UpdateDockIcon(browser->GetProfile());
-    PrepareMenuLocales();
-  }
+  if (browser) PrepareMenuLocales();
   [SpacesMenuController() setBrowser:browser];
   const std::string language = browser
       ? WorkspaceState::ForProfile(browser->GetProfile())->language() : "";

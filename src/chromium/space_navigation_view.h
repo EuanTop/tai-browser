@@ -75,6 +75,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   const std::string& active_space_id() const { return active_space_id_; }
   void OnThemeChanged() override;
   SkColor SidebarColor() const;
+  SkColor SidebarBackdropColor() const;
   ui::ColorProviderKey::InitializerSupplier& GlobalSearchPalette() const;
   bool HasPrideBackdrop() const;
   bool IsDark() const;
@@ -164,7 +165,9 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void ShowAppearance();
   void UpdateFrameButton();
   SkColor SidebarColorFor(const std::string& space_id) const;
-  bool HasPrideBackdropFor(const std::string& space_id) const;
+  void SetSwipeBackdropColor(std::optional<SkColor> color);
+  void UpdateSharedSidebarInk(bool dark);
+  void UpdateFrameButtonInk(bool dark);
   void SchedulePageChromeRefresh();
   void RefreshPageChrome();
   bool IsSpaceTransitionRunning() const;
@@ -244,6 +247,9 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   raw_ptr<views::View> swipe_preview_ = nullptr;
   raw_ptr<views::View> swipe_preview_title_ = nullptr;
   std::string swipe_preview_space_id_;
+  class SwipeBackdropAnimation;
+  std::unique_ptr<SwipeBackdropAnimation> swipe_backdrop_animation_;
+  std::optional<SkColor> swipe_backdrop_color_;
   // This window's positions are discarded when the sidebar is destroyed.
   std::map<std::string, float> space_scroll_offsets_;
   std::string rendered_space_id_;
