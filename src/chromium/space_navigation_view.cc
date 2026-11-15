@@ -58,7 +58,6 @@
 #include "ui/compositor/layer_tree_owner.h"
 #include "ui/compositor/scoped_layer_animation_settings.h"
 #include "ui/gfx/animation/animation.h"
-#include "base/memory/raw_ref.h"
 #include "ui/gfx/animation/animation_delegate.h"
 #include "ui/gfx/animation/linear_animation.h"
 #include "ui/gfx/animation/slide_animation.h"
@@ -1234,7 +1233,7 @@ class SpaceNavigationView::SwipeBackdropAnimation final : public gfx::AnimationD
  public:
   SwipeBackdropAnimation(SpaceNavigationView& sidebar, base::TimeDelta duration,
                          SkColor from, SkColor to)
-      : sidebar_(sidebar), from_(from), to_(to),
+      : sidebar_(&sidebar), from_(from), to_(to),
         animation_(duration, gfx::LinearAnimation::kDefaultFrameRate, this) {
     animation_.Start();
   }
@@ -1246,7 +1245,7 @@ class SpaceNavigationView::SwipeBackdropAnimation final : public gfx::AnimationD
         from_, to_));
   }
 
-  const raw_ref<SpaceNavigationView> sidebar_;
+  const raw_ptr<SpaceNavigationView> sidebar_;
   const SkColor from_;
   const SkColor to_;
   gfx::LinearAnimation animation_;
@@ -1482,8 +1481,7 @@ void SpaceNavigationView::SetSwipeBackdropColor(std::optional<SkColor> color) {
   SchedulePaint();
   if (auto* widget = GetWidget()) {
     auto* root = widget->GetRootView();
-    gfx::Rect rail = GetLocalBounds();
-    views::View::ConvertRectToTarget(this, root, &rail);
+    const auto rail = views::View::ConvertRectToTarget(this, root, GetLocalBounds());
     root->SchedulePaintInRect(
         gfx::Rect(rail.x(), 0, rail.width(), root->height()));
   }
@@ -1494,10 +1492,10 @@ void SpaceNavigationView::UpdateSharedSidebarInk(bool dark) {
     if (auto* button = views::AsViewClass<SidebarButton>(view))
       button->SetDark(dark);
   };
-  for (auto* row : favorites_body_->children()) {
-    for (auto* button : row->children()) update(button);
+  for (const auto& row : favorites_body_->children()) {
+    for (const auto& button : row->children()) update(button);
   }
-  for (auto* button : dock_->children()) update(button);
+  for (const auto& button : dock_->children()) update(button);
   UpdateFrameButtonInk(dark);
 }
 
