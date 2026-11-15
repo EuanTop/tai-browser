@@ -171,7 +171,8 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void FinishSpaceTransition();
   void OnSpaceTransitionFinished(unsigned generation);
   void AnimateSpaceLayers(base::TimeDelta duration, float outgoing_offset,
-                          std::optional<float> preview_offset = std::nullopt);
+                          std::optional<float> preview_offset = std::nullopt,
+                          bool commit_swipe = false);
   void PlaySpaceTransition(std::optional<float> swipe_entrance);
   void PreviewSpaceSwipe(float offset);
   void CompleteSpaceSwipe(float offset, bool flick);
@@ -187,6 +188,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   bool Swipe(float x, float y);
   void SwitchRelativeSpace(int delta);
   void ActivateSpace(std::string id);
+  void SelectSpace(std::string id, bool animate);
   void CreateSpace();
   void OpenSettings();
   void NewTab(bool placeholder = false);
@@ -280,6 +282,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   std::unique_ptr<ui::Layer> outgoing_title_layer_;
   bool transition_from_swipe_ = false;
   bool swipe_preview_active_ = false;
+  int settling_swipe_direction_ = 0;
   std::map<std::string, raw_ptr<FolderRevealView>> folder_rows_;
   bool committing_folder_change_ = false;
   bool refresh_after_folder_reveal_ = false;

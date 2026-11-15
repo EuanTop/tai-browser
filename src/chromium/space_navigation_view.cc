@@ -1790,7 +1790,8 @@ void SpaceNavigationView::ScheduleRefresh() {
 void SpaceNavigationView::Refresh() {
   refresh_pending_ = false;
   if (!model_ || !workspace_->loaded()) return;
-  if ((IsSpaceTransitionRunning() || swipe_preview_active_) &&
+  if ((IsSpaceTransitionRunning() || swipe_preview_active_ ||
+       settling_swipe_direction_) &&
       !transition_direction_) {
     refresh_after_transition_ = true;
     return;
@@ -1922,6 +1923,7 @@ void SpaceNavigationView::FinishSpaceTransition() {
   transition_direction_ = 0;
   transition_from_swipe_ = false;
   swipe_preview_active_ = false;
+  settling_swipe_direction_ = 0;
   if (space_body_) {
     space_body_->layer()->GetAnimator()->StopAnimating();
     space_body_->layer()->SetTransform(gfx::Transform());
@@ -1938,23 +1940,37 @@ void SpaceNavigationView::OnSpaceTransitionFinished(unsigned generation) {
   if (generation != transition_generation_) return;
   outgoing_space_layer_.reset();
   outgoing_title_layer_.reset();
+  if (const int direction = std::exchange(settling_swipe_direction_, 0)) {
+    const std::string target = swipe_preview_space_id_;
+    // The incoming preview already covers the viewport. Replace it with live
+    // rows and activate the page only after the compositor has settled.
+    base::AutoReset<int> gesture(&gesture_direction_override_, direction);
+    SelectSpace(target, /*animate=*/false);
+    Refresh();
+  }
   RemoveSwipePreview();
+  if (space_body_) space_body_->SetCanProcessEventsWithinSubtree(true);
+  if (space_header_) space_header_->SetCanProcessEventsWithinSubtree(true);
   if (std::exchange(refresh_after_transition_, false)) ScheduleRefresh();
 }
 void SpaceNavigationView::AnimateSpaceLayers(base::TimeDelta duration,
                                              float outgoing_offset,
-                                             std::optional<float> preview_offset) {
+                                             std::optional<float> preview_offset,
+                                             bool commit_swipe) {
   const auto finished = base::BindPostTaskToCurrentDefault(base::BindRepeating(
       &SpaceNavigationView::OnSpaceTransitionFinished, weak_factory_.GetWeakPtr(),
       ++transition_generation_));
+  const gfx::Transform body_target =
+      gfx::Transform::MakeTranslation(commit_swipe ? outgoing_offset : 0.f, 0);
+  const float body_opacity = commit_swipe ? 0.f : 1.f;
   views::AnimationBuilder animation;
   auto& block = animation.OnEnded(finished).OnAborted(finished).Once()
                     .SetDuration(duration)
-                    .SetTransform(space_body_, gfx::Transform(), gfx::Tween::EASE_OUT)
-                    .SetOpacity(space_body_, 1.f, gfx::Tween::EASE_OUT);
+                    .SetTransform(space_body_, body_target, gfx::Tween::EASE_OUT)
+                    .SetOpacity(space_body_, body_opacity, gfx::Tween::EASE_OUT);
   if (space_header_ && !space_header_->layer()->transform().IsIdentity()) {
-    block.SetTransform(space_header_, gfx::Transform(), gfx::Tween::EASE_OUT)
-        .SetOpacity(space_header_, 1.f, gfx::Tween::EASE_OUT);
+    block.SetTransform(space_header_, body_target, gfx::Tween::EASE_OUT)
+        .SetOpacity(space_header_, body_opacity, gfx::Tween::EASE_OUT);
   }
   for (auto* outgoing : {outgoing_space_layer_.get(), outgoing_title_layer_.get()}) {
     if (!outgoing) continue;
@@ -2004,6 +2020,8 @@ void SpaceNavigationView::PlaySpaceTransition(std::optional<float> swipe_entranc
 void SpaceNavigationView::PreviewSpaceSwipe(float offset) {
   if (!CanAnimateSpace() || space_body_->width() <= 0) return;
   if (!swipe_preview_active_) {
+    if (settling_swipe_direction_)
+      OnSpaceTransitionFinished(transition_generation_);
     FinishSpaceTransition();
     swipe_preview_active_ = true;
   }
@@ -2088,10 +2106,22 @@ void SpaceNavigationView::CompleteSpaceSwipe(float offset, bool flick) {
   const float threshold = width > 0 ? std::min(kSwipeCommitDistance, width * 0.3f)
                                     : kSwipeCommitDistance;
   const float distance = std::abs(offset);
-  if (workspace_->model().spaces().size() > 1 &&
-      (distance >= threshold || (flick && distance >= kSwipeFlickDistance))) {
+  const bool commit = workspace_->model().spaces().size() > 1 &&
+      (distance >= threshold || (flick && distance >= kSwipeFlickDistance));
+  TRACE_EVENT("browser", "TAi.CompleteSpaceSwipe", "commit", commit,
+              "offset", offset, "flick", flick);
+  if (commit) {
+    const int direction = (offset < 0) != base::i18n::IsRTL() ? 1 : -1;
+    if (had_preview && swipe_preview_ && CanAnimateSpace()) {
+      settling_swipe_direction_ = direction;
+      space_body_->SetCanProcessEventsWithinSubtree(false);
+      space_header_->SetCanProcessEventsWithinSubtree(false);
+      AnimateSpaceLayers(kSwipeEntryDuration, std::copysign(width, offset),
+                         0.f, /*commit_swipe=*/true);
+      return;
+    }
     transition_from_swipe_ = true;
-    SwitchRelativeSpace((offset < 0) != base::i18n::IsRTL() ? 1 : -1);
+    SwitchRelativeSpace(direction);
     return;
   }
   if (had_preview && CanAnimateSpace()) {
@@ -2112,6 +2142,10 @@ void SpaceNavigationView::RemoveSwipePreview() {
   if (title) title->parent()->RemoveChildViewT(title);
 }
 void SpaceNavigationView::ActivateSpace(std::string id) {
+  SelectSpace(std::move(id), /*animate=*/true);
+}
+void SpaceNavigationView::SelectSpace(std::string id, bool animate) {
+  if (settling_swipe_direction_) FinishSpaceTransition();
   if (editor_ && editor_->HasFocus()) CommitRename();
   if (!workspace_->loaded() || !model_) return;
   SyncTabs();
@@ -2126,9 +2160,9 @@ void SpaceNavigationView::ActivateSpace(std::string id) {
     VLOG(1) << "TAi Space switch gesture=" << (gesture_direction_override_ != 0);
     const auto old_index = std::distance(ws.spaces().begin(), std::ranges::find(ws.spaces(), active_space_id_, &WorkspaceSpace::id));
     const auto new_index = std::distance(ws.spaces().begin(), std::ranges::find(ws.spaces(), id, &WorkspaceSpace::id));
-    transition_direction_ = gesture_direction_override_
-                                ? gesture_direction_override_
-                                : (new_index > old_index ? 1 : -1);
+    transition_direction_ = !animate ? 0
+        : gesture_direction_override_ ? gesture_direction_override_
+                                      : (new_index > old_index ? 1 : -1);
     if (base::i18n::IsRTL()) transition_direction_ = -transition_direction_;
   }
   if (!ws.ActivateSpace(id)) return;
@@ -2990,6 +3024,8 @@ void SpaceNavigationView::Render() {
     }
   } else if (IsSpaceTransitionRunning() || swipe_preview_active_) {
     FinishSpaceTransition();
+  } else if (new_space) {
+    RemoveSwipePreview();
   }
   ClearDropFeedback(); drop_zones_.clear();
   row_items_.clear(); editor_ = nullptr;
@@ -3673,20 +3709,16 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 30);
   send_scroll(-45, 0, ui::EventMomentumPhase::NONE, 40);
   send_scroll(-40, 0, ui::EventMomentumPhase::NONE, 70);
-  const float entrance = swipe_preview_
-      ? swipe_preview_->layer()->transform().To2dTranslation().x() : 0.f;
   expect("crossing the distance threshold still waits for lift", active_space_id_ == a);
   send_scroll(0, 0, ui::EventMomentumPhase::END, 75);
+  expect("lift settles the same two lists without rebuilding rows on the input path",
+         !animate || (active_space_id_ == a && settling_swipe_direction_ == 1 &&
+             swipe_preview_ && swipe_preview_->layer()->GetTargetTransform().IsIdentity() &&
+             space_body_->layer()->GetTargetOpacity() == 0.f));
+  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
   Refresh();
-  expect("lift switches and sends the outgoing Space onward as the next slides in",
-         active_space_id_ == b &&
-             (!animate || (outgoing_space_layer_ &&
-                 outgoing_space_layer_->transform().To2dTranslation().x() < 0.f &&
-                 outgoing_space_layer_->GetTargetOpacity() == 0.f &&
-                 space_body_->layer()->transform().To2dTranslation().x() == entrance &&
-                 space_body_->layer()->GetTargetOpacity() == 1.f)));
-  expect("committing the swipe paints the destination backdrop immediately",
-         painted_backdrop(this) == 0xff35333f);
+  expect("the settled swipe activates the destination and resets its transform",
+         active_space_id_ == b && space_body_->layer()->transform().IsIdentity());
   send_scroll(-150, 0, ui::EventMomentumPhase::INERTIAL_UPDATE, 100);
   send_scroll(0, 0, ui::EventMomentumPhase::END, 130);
   expect("trackpad momentum cannot switch again", active_space_id_ == b);
@@ -3695,6 +3727,7 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   send_scroll(85, 0, ui::EventMomentumPhase::NONE, 170);
   expect("right swipe over blank sidebar waits for lift", active_space_id_ == b);
   send_scroll(0, 0, ui::EventMomentumPhase::END, 185);
+  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
   Refresh();
   expect("right swipe over blank sidebar returns to the previous Space",
          active_space_id_ == a);
@@ -3752,7 +3785,6 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   expect("direct Space selection restores that Space's scroll position",
          scrolled_second && std::abs(SpaceScrollOffset(b) - second_offset) < 0.01f &&
              wait_for_offset(first_offset));
-  const int previous_layer_y = space_body_->layer()->bounds().y();
   const float next_swipe = base::i18n::IsRTL() ? 1.f : -1.f;
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 200);
   send_scroll(next_swipe * 85.f, 0, ui::EventMomentumPhase::NONE, 210);
@@ -3761,14 +3793,13 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
              (!animate || (swipe_preview_space_id_ == b &&
                             preview_offset() == second_offset)));
   send_scroll(0, 0, ui::EventMomentumPhase::END, 225);
+  expect("lift keeps the source scroll position throughout compositor settling",
+         !animate || (settling_swipe_direction_ && current_offset() == first_offset));
+  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
   Refresh();
   widget->LayoutRootViewIfNecessary();
-  expect("swipe commit keeps both columns at their positions",
-         active_space_id_ == b &&
-             (!animate || (outgoing_space_layer_ &&
-                 outgoing_space_layer_->bounds().y() ==
-                     previous_layer_y - first_offset)) &&
-             wait_for_offset(second_offset));
+  expect("swipe commit replaces the preview at the destination scroll position",
+         active_space_id_ == b && wait_for_offset(second_offset));
   FinishSpaceTransition();
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 250);
   send_scroll(-next_swipe * 85.f, 0, ui::EventMomentumPhase::NONE, 260);
@@ -3777,6 +3808,7 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
              (!animate || (swipe_preview_space_id_ == a &&
                             preview_offset() == first_offset)));
   send_scroll(0, 0, ui::EventMomentumPhase::END, 275);
+  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
   Refresh();
   widget->LayoutRootViewIfNecessary();
   expect("reverse swipe restores the previous Space's scroll position",
