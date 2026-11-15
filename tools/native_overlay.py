@@ -55,6 +55,15 @@ FOCUS = 'chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_de
 BINDERS = 'chrome/browser/chrome_browser_interface_binders.cc'
 PANEL_IDS = 'chrome/browser/ui/side_panel/side_panel_entry_id.h'
 PANEL_ID_IMPL = 'chrome/browser/ui/side_panel/side_panel_entry_id.cc'
+SEARCH_FEATURES = 'chrome/browser/metrics/chrome_feature_list_creator.cc'
+SEARCH_METRICS_BUILD = 'chrome/browser/metrics/BUILD.gn'
+SEARCH_CONTROLLER = ('chrome/browser/ui/omnibox/omnibox_everywhere/'
+                     'omnibox_everywhere_controller.cc')
+SEARCH_BACKGROUND = ('chrome/browser/background/omnibox_everywhere/'
+                     'omnibox_everywhere_background_mode_manager.cc')
+SEARCH_WEBUI = 'chrome/browser/ui/webui/omnibox_everywhere/omnibox_everywhere_ui.cc'
+GLOBAL_SEARCH_FILES = (SEARCH_FEATURES, SEARCH_METRICS_BUILD, SEARCH_CONTROLLER,
+                       SEARCH_BACKGROUND, SEARCH_WEBUI)
 BRAND_ASSETS = {
     'kProductIcon': 'brand/atrium/product-icon-64.png',
     'kAboutIcon': 'brand/atrium/product-icon-256.png',
@@ -86,6 +95,94 @@ def replace_once(source, before, after):
 
 def upstream(path):
     return subprocess.check_output(['git', 'show', 'HEAD:' + path], cwd=SOURCE)
+
+
+def global_search_changes():
+    mode = 'base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser")'
+    features = replace_once(upstream(SEARCH_FEATURES).decode(),
+        '#include "chrome/common/chrome_paths.h"',
+        '#include "chrome/common/chrome_paths.h"\n'
+        '#if BUILDFLAG(IS_MAC)\n'
+        '#include "chrome/browser/ui/omnibox/omnibox_next_features.h"\n'
+        '#endif')
+    features = replace_once(features,
+        '  variations_service->SetUpFieldTrials(\n'
+        '      variation_ids,\n'
+        '      content::GetSwitchDependentFeatureOverrides(\n'
+        '          *base::CommandLine::ForCurrentProcess()),\n'
+        '      std::move(feature_list), browser_field_trials_.get());',
+        '  auto overrides = content::GetSwitchDependentFeatureOverrides(\n'
+        '      *base::CommandLine::ForCurrentProcess());\n'
+        '#if BUILDFLAG(IS_MAC)\n'
+        f'  if ({mode}) {{\n'
+        '    overrides.emplace_back(omnibox::kOmniboxEverywhere,\n'
+        '                           base::FeatureList::OVERRIDE_ENABLE_FEATURE);\n'
+        '    // TAi already exposes this shortcut in its own settings.\n'
+        '    overrides.emplace_back(omnibox::kOmniboxEverywhereFre,\n'
+        '                           base::FeatureList::OVERRIDE_DISABLE_FEATURE);\n'
+        '  }\n'
+        '#endif\n'
+        '  variations_service->SetUpFieldTrials(\n'
+        '      variation_ids, overrides, std::move(feature_list),\n'
+        '      browser_field_trials_.get());')
+    metrics = replace_once(upstream(SEARCH_METRICS_BUILD).decode(),
+        '  if (enable_pdf) {\n    deps += [ "//components/pdf/browser" ]',
+        '  if (is_mac) {\n'
+        '    deps += [ "//chrome/browser/ui/omnibox" ]\n'
+        '  }\n\n'
+        '  if (enable_pdf) {\n    deps += [ "//components/pdf/browser" ]')
+    controller = replace_once(upstream(SEARCH_CONTROLLER).decode(),
+        'namespace omnibox_everywhere {\n',
+        'namespace omnibox_everywhere {\n\n'
+        'namespace {\n'
+        'bool UsesTaiShortcut() {\n'
+        f'  return BUILDFLAG(IS_MAC) && {mode};\n'
+        '}\n'
+        '}  // namespace\n')
+    controller = replace_once(controller,
+        'void OmniboxEverywhereController::UpdateHotkeyRegistration() {\n',
+        'void OmniboxEverywhereController::UpdateHotkeyRegistration() {\n'
+        '  if (UsesTaiShortcut()) {\n'
+        '    return;\n'
+        '  }\n')
+    controller = replace_once(controller,
+        '  if (source == InvocationSource::kGlobalHotkey) {\n'
+        '    if (!IsHotkeyEnabled()) {',
+        '  if (source == InvocationSource::kGlobalHotkey && !UsesTaiShortcut()) {\n'
+        '    if (!IsHotkeyEnabled()) {')
+    controller = replace_once(controller,
+        '  // Enable background mode/launch on startup the first time this is invoked.\n'
+        '  if (g_browser_process && g_browser_process->local_state()) {',
+        '  // Enable background mode/launch on startup the first time this is invoked.\n'
+        '  if (!UsesTaiShortcut() && g_browser_process &&\n'
+        '      g_browser_process->local_state()) {')
+    background = replace_once(upstream(SEARCH_BACKGROUND).decode(),
+        '#include "base/check.h"',
+        '#include "base/check.h"\n#include "base/command_line.h"')
+    background = replace_once(background,
+        'void OmniboxEverywhereBackgroundModeManager::OnPrefChanged() {\n',
+        'void OmniboxEverywhereBackgroundModeManager::OnPrefChanged() {\n'
+        f'  if (BUILDFLAG(IS_MAC) && {mode}) {{\n'
+        '    Reset();\n'
+        '    return;\n'
+        '  }\n')
+    webui = upstream(SEARCH_WEBUI).decode()
+    if '#include "base/command_line.h"' not in webui:
+        webui = replace_once(webui, '#include "base/feature_list.h"',
+            '#include "base/command_line.h"\n#include "base/feature_list.h"')
+    webui = replace_once(webui,
+        '  source->AddBoolean("omniboxEverywhereProfilePickerEnabled",\n'
+        '                     omnibox::kOmniboxEverywhereProfilePickerParam.Get());',
+        '  source->AddBoolean("omniboxEverywhereProfilePickerEnabled",\n'
+        f'                     !(BUILDFLAG(IS_MAC) && {mode}) &&\n'
+        '                         omnibox::kOmniboxEverywhereProfilePickerParam.Get());')
+    return {
+        SEARCH_FEATURES: features.encode(),
+        SEARCH_METRICS_BUILD: metrics.encode(),
+        SEARCH_CONTROLLER: controller.encode(),
+        SEARCH_BACKGROUND: background.encode(),
+        SEARCH_WEBUI: webui.encode(),
+    }
 
 
 def changes():
@@ -147,6 +244,14 @@ def changes():
         '      "//ui/base/dragdrop/mojom",\n'
         '      "//ui/views",\n'
         '    ]\n'
+        '    if (is_mac) {\n'
+        '      deps += [\n'
+        '        ":browser_process",\n'
+        '        ":global_features",\n'
+        '        "//chrome/browser/ui/omnibox",\n'
+        '        "//chrome/browser/ui/omnibox/omnibox_everywhere",\n'
+        '      ]\n'
+        '    }\n'
         '  }\n'
         '}\n\n' + target_anchor)
     region = upstream(REGION).decode()
@@ -730,7 +835,7 @@ def changes():
         '      url, formatted_url, ChromeAutocompleteSchemeClassifier(GetProfile()), nullptr);\n'
         '  return base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser")\n'
         '      ? sidebar::DisplayTaiURL(url, std::move(formatted)) : formatted;')
-    return {**settings_overlay.changes(upstream, replace_once), OMNIBOX_INPUT: omni_input.encode(), SCHEME_CLASSIFIER: scheme.encode(), LOCATION_IDENTITY: identity.encode(), PAGES: pages.encode(), COMMAND_CONTROLLER: controller.encode(), KEY_DISPATCH: key_dispatch.encode(), **reload_sources, ext_toolbar_path: ext_toolbar.encode(), panel_path: panel.encode(), themed_path: themed.encode(), main_bg_path: main_bg.encode(), mac_path: mac.encode(), OMNIBOX: omnibox.encode(), FOCUS: focus.encode(), BINDERS: binders.encode(), PANEL_IDS: panel_ids.encode(), PANEL_ID_IMPL: panel_impl.encode(), UNTRUSTED: untrusted.encode(), BUILD: build.encode(), WEBUI: webui.encode(), REGION: region.encode(), STATE: state.encode(),
+    return {**settings_overlay.changes(upstream, replace_once), **global_search_changes(), OMNIBOX_INPUT: omni_input.encode(), SCHEME_CLASSIFIER: scheme.encode(), LOCATION_IDENTITY: identity.encode(), PAGES: pages.encode(), COMMAND_CONTROLLER: controller.encode(), KEY_DISPATCH: key_dispatch.encode(), **reload_sources, ext_toolbar_path: ext_toolbar.encode(), panel_path: panel.encode(), themed_path: themed.encode(), main_bg_path: main_bg.encode(), mac_path: mac.encode(), OMNIBOX: omnibox.encode(), FOCUS: focus.encode(), BINDERS: binders.encode(), PANEL_IDS: panel_ids.encode(), PANEL_ID_IMPL: panel_impl.encode(), UNTRUSTED: untrusted.encode(), BUILD: build.encode(), WEBUI: webui.encode(), REGION: region.encode(), STATE: state.encode(),
             COMMANDS: commands.encode(), RESTORE: restore.encode(), SESSION_RESTORE: session_restore.encode(), SESSION_SERVICE: session_service.encode(), CONTEXT: context.encode(), TOOLBAR: toolbar.encode(), LOCATION: location.encode(), WIDGET: widget.encode(), BROWSER_VIEW: browser_view.encode(), MULTI_CONTENTS: multi_contents.encode()}
 
 
