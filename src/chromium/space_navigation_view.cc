@@ -717,6 +717,10 @@ SidebarBackdropColors MakeSidebarBackdrop(SkColor color, bool pride) {
   const double hue = seed.s < 0.07 ? 0.70 : seed.h;
   const double saturation = std::clamp(seed.s * 0.68 + 0.24, 0.32, 0.75);
   const double spread = 0.87 + seed.s * 0.2;
+  const bool dark = color_utils::IsDark(color);
+  const SkColor ink = dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53);
+  const float contrast = std::min(color_utils::kMinimumReadableContrastRatio,
+                                  color_utils::GetContrastRatio(ink, color));
   constexpr std::array hue_offsets{-0.16, -0.07, 0.0, 0.085, 0.18};
   constexpr std::array light_offsets{0.075, 0.038, 0.0, 0.022, -0.040};
   for (size_t i = 0; i < colors.stops.size(); ++i) {
@@ -725,7 +729,9 @@ SidebarBackdropColors MakeSidebarBackdrop(SkColor color, bool pride) {
     const SkColor tint = color_utils::HSLToSkColor(
         {std::fmod(hue + hue_offsets[i] * spread + 1, 1), saturation, lightness},
         SK_AlphaOPAQUE);
-    colors.stops[i] = color_utils::AlphaBlend(tint, color, 0.64f);
+    colors.stops[i] = color_utils::BlendForMinContrast(
+        color_utils::AlphaBlend(tint, color, 0.64f), ink,
+        dark ? SK_ColorBLACK : SK_ColorWHITE, contrast).color;
   }
   return colors;
 }
@@ -4130,6 +4136,10 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
              std::ranges::all_of(charcoal.stops, [](SkColor color) {
                return color_utils::GetContrastRatio(SK_ColorWHITE, color) >= 4.5f;
              }));
+  expect("Pride keeps white sidebar text readable across its cool gradient",
+         std::ranges::all_of(blue.stops, [](SkColor color) {
+           return color_utils::GetContrastRatio(SK_ColorWHITE, color) >= 4.5f;
+         }));
   ws.SetSpaceColor(a, original_color);
   workspace_->SetEdition(original_edition);
 
