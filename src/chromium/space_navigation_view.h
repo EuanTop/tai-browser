@@ -166,6 +166,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void UpdateFrameButton();
   SkColor SidebarColorFor(const std::string& space_id) const;
   void SetSwipeBackdropColor(std::optional<SkColor> color);
+  void ScheduleSidebarBackdropPaint();
   void UpdateSharedSidebarInk(bool dark);
   void UpdateFrameButtonInk(bool dark);
   void SchedulePageChromeRefresh();

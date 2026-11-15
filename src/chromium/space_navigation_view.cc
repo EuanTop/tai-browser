@@ -47,6 +47,7 @@
 #include "chrome/browser/ui/color/chrome_color_id.h"
 #include "ui/color/color_provider.h"
 #include "chrome/browser/ui/views/frame/custom_corners_background.h"
+#include "chrome/browser/ui/views/frame/browser_frame_view.h"
 #include "chrome/browser/ui/tabs/tab_model.h"
 #include "ui/base/clipboard/clipboard_format_type.h"
 #include "ui/base/dragdrop/drag_drop_types.h"
@@ -54,6 +55,7 @@
 #include "ui/base/dragdrop/drop_target_event.h"
 #include "ui/base/dragdrop/os_exchange_data.h"
 #include "ui/compositor/layer.h"
+#include "ui/compositor/compositor.h"
 #include "ui/compositor/layer_solid_color.h"
 #include "ui/compositor/layer_tree_owner.h"
 #include "ui/compositor/scoped_layer_animation_settings.h"
@@ -63,6 +65,7 @@
 #include "ui/gfx/animation/slide_animation.h"
 #include "ui/gfx/geometry/transform.h"
 #include "ui/views/animation/animation_builder.h"
+#include "ui/views/animation/animation_delegate_views.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/color_utils.h"
 #include "ui/views/button_drag_utils.h"
@@ -99,6 +102,7 @@
 #include "components/sessions/content/session_tab_helper.h"
 #include "components/sessions/core/tab_restore_service.h"
 #include "components/vector_icons/vector_icons.h"
+#include "components/viz/common/frame_sinks/copy_output_request.h"
 #include "components/viz/common/frame_sinks/copy_output_result.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/color/color_provider_key.h"
@@ -1229,11 +1233,12 @@ DEFINE_USER_DATA(SpaceNavigationView);
 SpaceNavigationView* SpaceNavigationView::From(BrowserWindowInterface* browser) {
   return browser ? Get(browser->GetUnownedUserDataHost()) : nullptr;
 }
-class SpaceNavigationView::SwipeBackdropAnimation final : public gfx::AnimationDelegate {
+class SpaceNavigationView::SwipeBackdropAnimation final
+    : public views::AnimationDelegateViews {
  public:
   SwipeBackdropAnimation(SpaceNavigationView& sidebar, base::TimeDelta duration,
                          SkColor from, SkColor to)
-      : sidebar_(&sidebar), from_(from), to_(to),
+      : views::AnimationDelegateViews(&sidebar), sidebar_(&sidebar), from_(from), to_(to),
         animation_(duration, gfx::LinearAnimation::kDefaultFrameRate, this) {
     animation_.Start();
   }
@@ -1478,12 +1483,24 @@ void SpaceNavigationView::SetSwipeBackdropColor(std::optional<SkColor> color) {
   if (previous == current) return;
   const bool dark = color_utils::IsDark(current);
   if (color_utils::IsDark(previous) != dark) UpdateSharedSidebarInk(dark);
+  ScheduleSidebarBackdropPaint();
+}
+
+void SpaceNavigationView::ScheduleSidebarBackdropPaint() {
   SchedulePaint();
-  if (auto* widget = GetWidget()) {
-    auto* root = widget->GetRootView();
-    const auto rail = views::View::ConvertRectToTarget(this, root, GetLocalBounds());
-    root->SchedulePaintInRect(
-        gfx::Rect(rail.x(), 0, rail.width(), root->height()));
+  if (!GetWidget()) return;
+  // A Views repaint stops at the nearest compositor layer. The vertical tab
+  // strip and macOS frame paint their own parts of the rail on separate layers.
+  const auto repaint_rail = [this](views::View* owner) {
+    const auto rail = views::View::ConvertRectToTarget(this, owner, GetLocalBounds());
+    owner->SchedulePaintInRect(
+        gfx::Rect(rail.x(), 0, rail.width(), owner->height()));
+  };
+  for (auto* ancestor = parent(); ancestor; ancestor = ancestor->parent()) {
+    if (ancestor->layer()) repaint_rail(ancestor);
+  }
+  if (auto* browser = BrowserView::GetBrowserViewForBrowser(browser_)) {
+    if (auto* frame = browser->GetFrameView()) repaint_rail(frame);
   }
 }
 
@@ -3252,8 +3269,7 @@ void SpaceNavigationView::Render(RenderState state) {
   auto& ws = workspace_->model();
   const bool dark = IsDark();
   const SkColor icon_color = dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53);
-  SchedulePaint();
-  if (GetWidget()) GetWidget()->GetRootView()->SchedulePaint();
+  ScheduleSidebarBackdropPaint();
   UpdateFrameButton();
   if (workspace_->load_error()) {
     auto* error = body_->AddChildView(std::make_unique<views::Label>(LocalizedText16(browser_->GetProfile(), "收藏数据未能读取，本次更改暂不保存", "Saved pages could not be read. Changes will not be saved.")));
@@ -3911,6 +3927,55 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   expect("cancelling the swipe restores the original backdrop immediately",
          painted_backdrop(this) == 0xffccddf2 && !swipe_preview_ &&
              !swipe_preview_title_);
+  if (animate) {
+    // Sample the actual window compositor. Painting the Background on a
+    // scratch Canvas cannot detect stale textures in other Views layers.
+    const auto rail = views::View::ConvertRectToTarget(this, root, GetLocalBounds());
+    const std::array probes = {
+        gfx::Point(rail.x() + 18, std::max(12, rail.y() / 2)),
+        gfx::Point(rail.x() + 18, rail.y() + 4),
+        gfx::Point(rail.x() + 4, rail.bottom() - 12),
+    };
+    const auto capture = [&] {
+      std::array<SkColor, probes.size()> colors{};
+      base::RunLoop loop(base::RunLoop::Type::kNestableTasksAllowed);
+      widget->GetCompositor()->root_layer()->RequestCopyOfOutput(
+          std::make_unique<viz::CopyOutputRequest>(
+              viz::CopyOutputRequest::ResultFormat::RGBA,
+              viz::CopyOutputRequest::ResultDestination::kSystemMemory,
+              base::BindOnce([&](std::unique_ptr<viz::CopyOutputResult> result) {
+                const auto pixels = result->ScopedAccessSkBitmap();
+                const auto& bitmap = pixels.bitmap();
+                if (!bitmap.empty()) {
+                  for (size_t i = 0; i < probes.size(); ++i) {
+                    const int x = probes[i].x() * bitmap.width() / root->width();
+                    const int y = probes[i].y() * bitmap.height() / root->height();
+                    if (x >= 0 && x < bitmap.width() && y >= 0 && y < bitmap.height())
+                      colors[i] = bitmap.getColor(x, y);
+                  }
+                }
+                loop.Quit();
+              })));
+      widget->GetCompositor()->ScheduleDraw();
+      loop.Run();
+      return colors;
+    };
+    const auto before = capture();
+    PreviewSpaceSwipe(-body_->parent()->width() * 0.35f);
+    const auto dragging = capture();
+    const auto visibly_changed = [&](size_t i) {
+      return SkColorGetA(before[i]) == SK_AlphaOPAQUE &&
+             SkColorGetA(dragging[i]) == SK_AlphaOPAQUE &&
+             !SimilarColors(before[i], dragging[i]);
+    };
+    expect("composited frame, upper sidebar and footer change during the held swipe",
+           active_space_id_ == a && visibly_changed(0) && visibly_changed(1) &&
+               visibly_changed(2));
+    FinishSpaceTransition();
+    const auto cancelled = capture();
+    expect("all three composited rails return to their initial colors on cancellation",
+           before == cancelled && active_space_id_ == a);
+  }
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 30);
   send_scroll(-45, 0, ui::EventMomentumPhase::NONE, 40);
   send_scroll(-40, 0, ui::EventMomentumPhase::NONE, 70);
