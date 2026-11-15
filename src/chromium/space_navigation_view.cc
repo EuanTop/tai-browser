@@ -2417,6 +2417,34 @@ void SpaceNavigationView::RemoveSwipePreview() {
   swipe_preview_title_ = nullptr;
   if (title) title->parent()->RemoveChildViewT(title);
 }
+tabs::TabInterface* SpaceNavigationView::ReusableHomePlaceholder(
+    tabs::TabInterface* preferred) {
+  const GURL home = ProductNewTabURL(browser_);
+  if (!home.is_valid()) return nullptr;
+
+  const auto can_reuse = [&](tabs::TabInterface* tab) {
+    if (!tab) return false;
+    const auto binding = bindings_.find(tab->GetHandle().raw_value());
+    if (binding == bindings_.end() || !binding->second.placeholder ||
+        !binding->second.item_id.empty()) {
+      return false;
+    }
+    auto* contents = tab->GetContents();
+    auto& controller = contents->GetController();
+    return contents->GetLastCommittedURL() == home && !contents->IsCrashed() &&
+           !controller.NeedsReload() && !controller.GetPendingEntry() &&
+           controller.GetEntryCount() == 1;
+  };
+
+  // Keep the visible Home document in place when both Spaces are empty.
+  if (auto* active = model_->GetActiveTab(); can_reuse(active)) return active;
+  if (can_reuse(preferred)) return preferred;
+  for (int index = 0; index < model_->count(); ++index) {
+    auto* tab = model_->GetTabAtIndex(index);
+    if (can_reuse(tab)) return tab;
+  }
+  return nullptr;
+}
 void SpaceNavigationView::ActivateSpace(std::string id) {
   SelectSpace(std::move(id), /*animate=*/true);
 }
@@ -2450,12 +2478,21 @@ void SpaceNavigationView::SelectSpace(std::string id, bool animate) {
       model_->GetIndexOfTab(last->second.Get()) != TabStripModel::kNoTab &&
       bindings_.contains(last->second.raw_value()) &&
       bindings_.at(last->second.raw_value()).space_id == id) target = last->second;
-  if (!target) {
+  if (!target || bindings_.at(target->raw_value()).placeholder) {
     auto tabs = VisibleTabs(false);
     if (!tabs.empty()) target = tabs.front();
+    if (!target || bindings_.at(target->raw_value()).placeholder) {
+      if (auto* home = ReusableHomePlaceholder(target ? target->Get() : nullptr)) {
+        SetBinding(home, {id, {}, true});
+        target = home->GetHandle();
+      }
+    }
   }
-  if (target) model_->ActivateTab(target->Get());
-  else NewTab(true);
+  if (target) {
+    if (model_->GetActiveTab() != target->Get()) model_->ActivateTab(target->Get());
+  } else {
+    NewTab(true);
+  }
   workspace_->Commit();
   ScheduleRefresh();
 }
@@ -4731,6 +4768,51 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   SelectNumberedTab(0);
   expect("numbered shortcuts can open a closed pinned sidebar page", LiveItem(numbered_page) && model_->GetActiveTab() == LiveItem(numbered_page)->Get());
   workspace_->SetShortcutOverrides(old_overrides.Clone());
+  {
+    const auto empty_one = NewId(), empty_two = NewId(), empty_three = NewId();
+    ws.AddSpace({empty_one, "Empty Home 1", "current-profile"});
+    ws.AddSpace({empty_two, "Empty Home 2", "current-profile"});
+    ws.AddSpace({empty_three, "Empty Home 3", "current-profile"});
+    const auto pinned = model_->GetActiveTab()->GetHandle();
+    ActivateSpace(empty_one);
+    const auto home = model_->GetActiveTab()->GetHandle();
+    const bool ready = wait_for([&] {
+      return home.Get()->GetContents()->GetLastCommittedURL() ==
+                 ProductNewTabURL(browser_) &&
+             !home.Get()->GetContents()->IsLoading();
+    });
+    const int tab_count = model_->count();
+    const auto is_same_home = [&](const std::string& space) {
+      return model_->GetActiveTab() == home.Get() && model_->count() == tab_count &&
+             bindings_.at(home.raw_value()) == TabOrganization{space, {}, true} &&
+             !home.Get()->GetContents()->GetController().GetPendingEntry();
+    };
+    ActivateSpace(empty_two);
+    const bool first_switch = is_same_home(empty_two);
+    ActivateSpace(empty_three);
+    const bool second_switch = is_same_home(empty_three);
+    ActivateSpace(empty_one);
+    expect("switching across empty Spaces keeps the same Home document and tab count",
+           ready && first_switch && second_switch && is_same_home(empty_one));
+    ActivateSpace(mru_space);
+    expect("returning to a populated Space restores its active page",
+           model_->GetActiveTab() == pinned.Get());
+    ActivateSpace(empty_two);
+    expect("entering an empty Space from a page reuses the loaded Home placeholder",
+           is_same_home(empty_two));
+    const GURL fixture("data:text/html,Empty%20Space%20navigation");
+    const bool navigated = navigate(home, fixture);
+    ActivateSpace(empty_three);
+    expect("a navigated Home belongs to its current Space and is never reused",
+           navigated && model_->GetActiveTab() != home.Get() &&
+               bindings_.at(home.raw_value()) == TabOrganization{empty_two, {}, false});
+    ActivateSpace(empty_two);
+    NewTab();
+    expect("an explicit New Tab still creates an ordinary tab in this Space",
+           model_->GetActiveTab() != home.Get() &&
+               bindings_.at(model_->GetActiveTab()->GetHandle().raw_value()) ==
+                   TabOrganization{empty_two, {}, false});
+  }
   workspace_->Commit(); Render();
   FinishSmokeTest(std::move(checks));
 }

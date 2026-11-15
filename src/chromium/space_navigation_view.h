@@ -204,6 +204,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void SwitchRelativeSpace(int delta);
   void ActivateSpace(std::string id);
   void SelectSpace(std::string id, bool animate);
+  tabs::TabInterface* ReusableHomePlaceholder(tabs::TabInterface* preferred);
   void CreateSpace();
   void OpenSettings();
   void NewTab(bool placeholder = false);
