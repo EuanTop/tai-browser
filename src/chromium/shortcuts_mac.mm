@@ -13,6 +13,7 @@
 #include "base/task/thread_pool.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "sidebar_browser/branding.h"
 #include "sidebar_browser/localization.h"
