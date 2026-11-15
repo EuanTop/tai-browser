@@ -47,7 +47,6 @@
 #include "chrome/browser/ui/color/chrome_color_id.h"
 #include "ui/color/color_provider.h"
 #include "chrome/browser/ui/views/frame/custom_corners_background.h"
-#include "chrome/browser/ui/views/frame/browser_frame_view.h"
 #include "chrome/browser/ui/tabs/tab_model.h"
 #include "ui/base/clipboard/clipboard_format_type.h"
 #include "ui/base/dragdrop/drag_drop_types.h"
@@ -141,6 +140,7 @@
 #include "ui/views/controls/separator.h"
 #include "ui/views/controls/textfield/textfield.h"
 #include "ui/views/view_tracker.h"
+#include "ui/views/window/non_client_view.h"
 #include "ui/views/view_class_properties.h"
 #include "ui/views/view_observer.h"
 #include "ui/views/view_utils.h"
@@ -1499,8 +1499,8 @@ void SpaceNavigationView::ScheduleSidebarBackdropPaint() {
   for (auto* ancestor = parent(); ancestor; ancestor = ancestor->parent()) {
     if (ancestor->layer()) repaint_rail(ancestor);
   }
-  if (auto* browser = BrowserView::GetBrowserViewForBrowser(browser_)) {
-    if (auto* frame = browser->GetFrameView()) repaint_rail(frame);
+  if (auto* non_client = GetWidget()->non_client_view()) {
+    if (auto* frame = non_client->frame_view()) repaint_rail(frame);
   }
 }
 
@@ -3943,30 +3943,36 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
           std::make_unique<viz::CopyOutputRequest>(
               viz::CopyOutputRequest::ResultFormat::RGBA,
               viz::CopyOutputRequest::ResultDestination::kSystemMemory,
-              base::BindOnce([&](std::unique_ptr<viz::CopyOutputResult> result) {
+              base::BindOnce([](std::array<SkColor, 3>* colors,
+                                std::array<gfx::Point, 3> probes,
+                                gfx::Size root_size, base::OnceClosure done,
+                                std::unique_ptr<viz::CopyOutputResult> result) {
                 const auto pixels = result->ScopedAccessSkBitmap();
                 const auto& bitmap = pixels.bitmap();
                 if (!bitmap.empty()) {
                   for (size_t i = 0; i < probes.size(); ++i) {
-                    const int x = probes[i].x() * bitmap.width() / root->width();
-                    const int y = probes[i].y() * bitmap.height() / root->height();
+                    const int x = probes[i].x() * bitmap.width() / root_size.width();
+                    const int y = probes[i].y() * bitmap.height() / root_size.height();
                     if (x >= 0 && x < bitmap.width() && y >= 0 && y < bitmap.height())
-                      colors[i] = bitmap.getColor(x, y);
+                      (*colors)[i] = bitmap.getColor(x, y);
                   }
                 }
-                loop.Quit();
-              })));
+                std::move(done).Run();
+              }, &colors, probes, root->size(), loop.QuitClosure())));
       widget->GetCompositor()->ScheduleDraw();
       loop.Run();
       return colors;
     };
-    const auto before = capture();
+    const auto idle_colors = capture();
     PreviewSpaceSwipe(-body_->parent()->width() * 0.35f);
     const auto dragging = capture();
+    VLOG(1) << "TAi compositor rail samples: " << std::hex
+            << idle_colors[0] << "/" << idle_colors[1] << "/" << idle_colors[2]
+            << " -> " << dragging[0] << "/" << dragging[1] << "/" << dragging[2];
     const auto visibly_changed = [&](size_t i) {
-      return SkColorGetA(before[i]) == SK_AlphaOPAQUE &&
+      return SkColorGetA(idle_colors[i]) == SK_AlphaOPAQUE &&
              SkColorGetA(dragging[i]) == SK_AlphaOPAQUE &&
-             !SimilarColors(before[i], dragging[i]);
+             !SimilarColors(idle_colors[i], dragging[i]);
     };
     expect("composited frame, upper sidebar and footer change during the held swipe",
            active_space_id_ == a && visibly_changed(0) && visibly_changed(1) &&
@@ -3974,7 +3980,7 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     FinishSpaceTransition();
     const auto cancelled = capture();
     expect("all three composited rails return to their initial colors on cancellation",
-           before == cancelled && active_space_id_ == a);
+           idle_colors == cancelled && active_space_id_ == a);
   }
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 30);
   send_scroll(-45, 0, ui::EventMomentumPhase::NONE, 40);
