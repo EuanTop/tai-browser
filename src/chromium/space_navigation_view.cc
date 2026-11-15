@@ -4692,7 +4692,7 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   bool branded_buttons = true;
   bool branded_states = true;
   for (bool dark : {false, true}) {
-    auto key = GetWidget()->GetColorProviderKey();
+    auto key = GetNativeTheme()->GetColorProviderKey(nullptr);
     key.color_mode = dark ? ui::ColorProviderKey::ColorMode::kDark
                           : ui::ColorProviderKey::ColorMode::kLight;
     key.contrast_mode = ui::ColorProviderKey::ContrastMode::kNormal;
