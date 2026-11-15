@@ -63,8 +63,15 @@ SEARCH_CONTROLLER = ('chrome/browser/ui/omnibox/omnibox_everywhere/'
 SEARCH_BACKGROUND = ('chrome/browser/background/omnibox_everywhere/'
                      'omnibox_everywhere_background_mode_manager.cc')
 SEARCH_WEBUI = 'chrome/browser/ui/webui/omnibox_everywhere/omnibox_everywhere_ui.cc'
+SEARCH_MANAGER = ('chrome/browser/ui/omnibox/omnibox_everywhere/'
+                  'omnibox_everywhere_ui_manager')
+SEARCH_RESOURCES = 'chrome/browser/resources/omnibox_everywhere/'
 GLOBAL_SEARCH_FILES = (SEARCH_FEATURES, SEARCH_METRICS_BUILD, SEARCH_CONTROLLER,
-                       SEARCH_BACKGROUND, SEARCH_WEBUI)
+                       SEARCH_BACKGROUND, SEARCH_WEBUI,
+                       SEARCH_MANAGER + '.cc', SEARCH_MANAGER + '.h',
+                       *(SEARCH_RESOURCES + name for name in (
+                           'BUILD.gn', 'app.ts', 'app.css', 'omnibox.css',
+                           'profile_icon.html.ts', 'profile_icon.css')))
 BRAND_ASSETS = {
     'kProductIcon': 'brand/atrium/product-icon-64.png',
     'kAboutIcon': 'brand/atrium/product-icon-256.png',
@@ -172,17 +179,173 @@ def global_search_changes():
         webui = replace_once(webui, '#include "base/feature_list.h"',
             '#include "base/command_line.h"\n#include "base/feature_list.h"')
     webui = replace_once(webui,
+        '  std::string profile_avatar_url =\n',
+        f'  const bool tai_style = BUILDFLAG(IS_MAC) && {mode};\n'
+        '  source->AddBoolean("taiStyle", tai_style);\n'
+        '  bool tai_default_avatar = tai_style;\n'
+        '  std::string profile_avatar_url =\n')
+    webui = replace_once(webui,
+        '    if (entry) {\n      gfx::Image icon = profiles::GetSizedAvatarIcon(',
+        '    if (entry) {\n'
+        '      tai_default_avatar = tai_style && entry->IsUsingDefaultAvatar() &&\n'
+        '                           !entry->GetGAIAPicture();\n'
+        '      gfx::Image icon = profiles::GetSizedAvatarIcon(')
+    webui = replace_once(webui,
         '  source->AddBoolean("omniboxEverywhereProfilePickerEnabled",\n'
         '                     omnibox::kOmniboxEverywhereProfilePickerParam.Get());',
+        '  source->AddBoolean("taiDefaultAvatar", tai_default_avatar);\n'
         '  source->AddBoolean("omniboxEverywhereProfilePickerEnabled",\n'
-        f'                     !(BUILDFLAG(IS_MAC) && {mode}) &&\n'
+        '                     !tai_style &&\n'
         '                         omnibox::kOmniboxEverywhereProfilePickerParam.Get());')
+    manager_header = replace_once(upstream(SEARCH_MANAGER + '.h').decode(),
+        '  // Closes the Omnibox Everywhere widget.',
+        '  // The supplier has process lifetime and only themes this popup.\n'
+        '  void SetTaiPalette(ui::ColorProviderKey::InitializerSupplier& palette);\n\n'
+        '  // Closes the Omnibox Everywhere widget.')
+    manager_header = replace_once(manager_header,
+        '  std::unique_ptr<views::Widget> widget_;',
+        '  raw_ptr<ui::ColorProviderKey::InitializerSupplier> tai_palette_ = nullptr;\n'
+        '  std::unique_ptr<views::Widget> widget_;')
+    manager = replace_once(upstream(SEARCH_MANAGER + '.cc').decode(),
+        'bool IsFuseboxEligible(Profile* profile) {',
+        '''class TaiSearchWidget final : public views::Widget {
+ public:
+  explicit TaiSearchWidget(ui::ColorProviderKey::InitializerSupplier& palette)
+      : palette_(&palette) {}
+
+  void SetPalette(ui::ColorProviderKey::InitializerSupplier& palette) {
+    if (palette_ == &palette) {
+      return;
+    }
+    palette_ = &palette;
+    ResetLastColorProviderKey();
+    ScheduleThemeChanged();
+  }
+
+  ui::ColorProviderKey GetColorProviderKey() const override {
+    auto key = views::Widget::GetColorProviderKey();
+    key.app_controller = palette_.get();
+    return key;
+  }
+
+ private:
+  raw_ptr<ui::ColorProviderKey::InitializerSupplier> palette_;
+};
+
+bool IsFuseboxEligible(Profile* profile) {''')
+    manager = replace_once(manager,
+        'void OmniboxEverywhereUIManager::CreateAndInitWidget(',
+        '''void OmniboxEverywhereUIManager::SetTaiPalette(
+    ui::ColorProviderKey::InitializerSupplier& palette) {
+  // A native entry point can have created the widget before the TAi shortcut.
+  if (widget_ && !tai_palette_) {
+    CleanUpWidget();
+  }
+  tai_palette_ = &palette;
+  if (widget_) {
+    static_cast<TaiSearchWidget*>(widget_.get())->SetPalette(palette);
+  }
+}
+
+void OmniboxEverywhereUIManager::CreateAndInitWidget(''')
+    manager = replace_once(manager,
+        '  widget_ = std::make_unique<views::Widget>();',
+        '''  if (tai_palette_) {
+    widget_ = std::make_unique<TaiSearchWidget>(*tai_palette_);
+  } else {
+    widget_ = std::make_unique<views::Widget>();
+  }''')
+    resources = {}
+
+    def style_file(name, before, after):
+        path = SEARCH_RESOURCES + name
+        original = resources[path].decode() if path in resources else upstream(path).decode()
+        resources[path] = replace_once(original, before, after).encode()
+
+    style_file('BUILD.gn',
+        '    "//ui/webui/resources/cr_components/composebox:build_ts",',
+        '    "//ui/webui/resources/cr_components/color_change_listener:build_ts",\n'
+        '    "//ui/webui/resources/cr_components/composebox:build_ts",')
+    style_file('app.ts',
+        "import type {ComposeboxState} from ",
+        "import {ColorChangeUpdater} from '//resources/cr_components/color_change_listener/colors_css_updater.js';\n"
+        "import type {ComposeboxState} from ")
+    style_file('app.ts',
+        '    super.connectedCallback();',
+        '''    super.connectedCallback();
+    if (loadTimeData.valueExists('taiStyle') && loadTimeData.getBoolean('taiStyle')) {
+      this.setAttribute('tai-style', '');
+      const colors = ColorChangeUpdater.forDocument();
+      colors.start();
+      // Covers the first load as well as changes while the cached popup is hidden.
+      void colors.refreshColorsCss();
+    }''')
+    style_file('app.css',
+        ':host([small-loomnibox]) {',
+        '''@media (forced-colors: none) and (prefers-contrast: no-preference) {
+  :host([tai-style]) {
+    --tai-search-accent: var(--color-searchbox-results-focus-indicator);
+    --tai-search-tint: color-mix(in srgb, var(--tai-search-accent) 11%, transparent);
+    --color-searchbox-results-background-selected: var(--tai-search-tint);
+    --cr-focus-outline-color: var(--tai-search-accent);
+  }
+
+  :host([tai-style]) :is(omnibox-everywhere-omnibox, omnibox-everywhere-composebox) {
+    --color-composebox-type-ahead-chip: var(--tai-search-tint);
+  }
+
+  :host([tai-style]) #mostVisitedContainer {
+    --most-visited-focus-shadow: 0 0 0 2px var(--tai-search-accent);
+  }
+}
+
+:host([small-loomnibox]) {''')
+    style_file('omnibox.css',
+        '  --color-searchbox-selection-background: rgba(26, 115, 232, 0.2);',
+        '  --color-searchbox-selection-background: '
+        'var(--tai-search-tint, rgba(26, 115, 232, 0.2));')
+    style_file('profile_icon.html.ts',
+        "import {html} from '//resources/lit/v3_0/lit.rollup.js';",
+        "import {html} from '//resources/lit/v3_0/lit.rollup.js';\n"
+        "import {loadTimeData} from '//resources/js/load_time_data.js';")
+    style_file('profile_icon.html.ts',
+        '      <img id="profileIcon" src="${this.profileAvatarUrl_}"\n'
+        '          alt="${this.i18n(\'profileButtonLabel\')}">',
+        '''      ${loadTimeData.valueExists('taiDefaultAvatar') &&
+                loadTimeData.getBoolean('taiDefaultAvatar') ? html`
+        <span id="taiAvatar" aria-hidden="true"><cr-icon icon="cr:person"></cr-icon></span>
+      ` : html`
+        <img id="profileIcon" src="${this.profileAvatarUrl_}"
+            alt="${this.i18n('profileButtonLabel')}">
+      `}''')
+    style_file('profile_icon.css',
+        ':host([is-enterprise-profile]) #profileContainer {',
+        '''#taiAvatar {
+  align-items: center;
+  background: var(--tai-search-tint, ButtonFace);
+  border-radius: 50%;
+  color: var(--tai-search-accent, ButtonText);
+  display: grid;
+  height: 20px;
+  justify-items: center;
+  width: 20px;
+}
+
+#taiAvatar cr-icon {
+  --iron-icon-height: 14px;
+  --iron-icon-width: 14px;
+}
+
+:host([is-enterprise-profile]) #profileContainer {''')
     return {
         SEARCH_FEATURES: features.encode(),
         SEARCH_METRICS_BUILD: metrics.encode(),
         SEARCH_CONTROLLER: controller.encode(),
         SEARCH_BACKGROUND: background.encode(),
         SEARCH_WEBUI: webui.encode(),
+        SEARCH_MANAGER + '.cc': manager.encode(),
+        SEARCH_MANAGER + '.h': manager_header.encode(),
+        **resources,
     }
 
 

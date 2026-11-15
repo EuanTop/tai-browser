@@ -704,6 +704,12 @@ constexpr std::pair<ui::ColorId, std::string_view> kChromePaletteColors[] = {CHR
 #include "ui/color/color_id_map_macros.inc"
 constexpr int kPageAccentHues = 12;
 
+SkColor AccentColor(int accent, bool dark) {
+  return color_utils::HSLToSkColor(
+      {(accent + 0.5) / kPageAccentHues, 0.43, dark ? 0.76 : 0.36},
+      SK_AlphaOPAQUE);
+}
+
 int PageAccentIndex(SkColor canvas, SkColor space_color, bool pride) {
   const auto channels = {SkColorGetR(canvas), SkColorGetG(canvas), SkColorGetB(canvas)};
   const auto [low, high] = std::minmax(channels);
@@ -715,12 +721,34 @@ int PageAccentIndex(SkColor canvas, SkColor space_color, bool pride) {
                        : (pride ? 9 : 8);
 }
 
+class SearchPalette final : public ui::ColorProviderKey::InitializerSupplier {
+ public:
+  explicit SearchPalette(int accent) : accent_(accent) {}
+
+  void AddColorMixers(ui::ColorProvider* provider,
+                      const ui::ColorProviderKey& key) const override {
+    if (key.contrast_mode == ui::ColorProviderKey::ContrastMode::kHigh ||
+        key.forced_colors != ui::ColorProviderKey::ForcedColors::kNone) {
+      return;
+    }
+    const bool dark = key.color_mode == ui::ColorProviderKey::ColorMode::kDark;
+    const SkColor accent = AccentColor(accent_, dark);
+    auto& mixer = provider->AddMixer();
+    mixer[ui::kColorSysStateFocusRing] = {accent};
+    mixer[kColorSearchboxResultsFocusIndicator] = {accent};
+    mixer[kColorSearchboxResultsIconFocusedOutline] = {accent};
+    mixer[kColorSearchboxResultsActionChipFocusOutline] = {accent};
+    mixer[kColorNewTabPageComposeboxSubmitButtonBackground] = {accent};
+  }
+
+ private:
+  const int accent_;
+};
+
 class PageChromePalette final : public ui::ColorProviderKey::InitializerSupplier {
  public:
   PageChromePalette(bool dark, int accent) : dark_(dark),
-      focus_color_(color_utils::HSLToSkColor(
-          {(accent + 0.5) / kPageAccentHues, 0.43, dark ? 0.76 : 0.36},
-          SK_AlphaOPAQUE)) {}
+      focus_color_(AccentColor(accent, dark)) {}
   void AddColorMixers(ui::ColorProvider* provider, const ui::ColorProviderKey& key) const override {
     auto reference_key = key;
     reference_key.app_controller = nullptr;
@@ -1322,6 +1350,21 @@ std::unique_ptr<views::Background> CreateToolbarBackground(views::View& view, Br
 }
 SkColor SpaceNavigationView::SidebarColor() const {
   return SidebarColorFor(active_space_id_);
+}
+ui::ColorProviderKey::InitializerSupplier&
+SpaceNavigationView::GlobalSearchPalette() const {
+  // ColorProvider keys outlive individual browser windows and Spaces.
+  static const base::NoDestructor<
+      std::array<std::unique_ptr<SearchPalette>, kPageAccentHues>> palettes([] {
+    std::array<std::unique_ptr<SearchPalette>, kPageAccentHues> result;
+    for (int index = 0; index < kPageAccentHues; ++index) {
+      result[index] = std::make_unique<SearchPalette>(index);
+    }
+    return result;
+  }());
+  const auto* space = workspace_->model().FindSpace(active_space_id_);
+  return *(*palettes)[PageAccentIndex(SK_ColorWHITE, space ? space->color : 0,
+                                     workspace_->edition() == "pride")];
 }
 SkColor SpaceNavigationView::SidebarColorFor(const std::string& space_id) const {
   const auto* space = workspace_->loaded() ? workspace_->model().FindSpace(space_id) : nullptr;

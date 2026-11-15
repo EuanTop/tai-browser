@@ -34,6 +34,7 @@
 #include "chrome/browser/ui/navigator/browser_navigator.h"
 #include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/browser/ui/omnibox/omnibox_everywhere/omnibox_everywhere_controller.h"
+#include "chrome/browser/ui/omnibox/omnibox_everywhere/omnibox_everywhere_ui_manager.h"
 #include "chrome/browser/ui/omnibox/omnibox_everywhere_service_factory.h"
 #include "chrome/browser/ui/omnibox/omnibox_next_features.h"
 #include "components/omnibox/browser/autocomplete_controller.h"
@@ -208,6 +209,8 @@ class GlobalSearchController final : public ui::GlobalAcceleratorListener::Obser
       if (omnibox::IsOmniboxEverywhereEnabled(profile) &&
           OmniboxEverywhereServiceFactory::GetForProfile(profile)) {
         if (ui_.panel.visible) Hide();
+        native->ui_manager()->SetTaiPalette(
+            SpaceNavigationView::From(browser)->GlobalSearchPalette());
         native->OnInvoke(omnibox_everywhere::InvocationSource::kGlobalHotkey,
                          profile);
         return;

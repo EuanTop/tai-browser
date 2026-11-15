@@ -29,6 +29,7 @@
 #include "components/sessions/core/session_id.h"
 #include "sidebar_browser/sidebar_session.h"
 #include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
+#include "ui/color/color_provider_key.h"
 #include "ui/menus/simple_menu_model.h"
 #include "ui/views/context_menu_controller.h"
 #include "ui/views/controls/textfield/textfield_controller.h"
@@ -73,6 +74,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   const std::string& active_space_id() const { return active_space_id_; }
   void OnThemeChanged() override;
   SkColor SidebarColor() const;
+  ui::ColorProviderKey::InitializerSupplier& GlobalSearchPalette() const;
   bool HasPrideBackdrop() const;
   bool IsDark() const;
   std::optional<SkColor> page_chrome_color() const { return page_chrome_color_; }
