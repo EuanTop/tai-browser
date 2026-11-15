@@ -4000,26 +4000,37 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     const auto rail = views::View::ConvertRectToTarget(this, root, GetLocalBounds());
     const auto list_bounds = views::View::ConvertRectToTarget(
         body_->parent(), root, body_->parent()->GetLocalBounds());
-    const int left_seam = list_bounds.x() + std::lround(list_bounds.width() * 0.65f);
-    const int right_seam = list_bounds.x() + std::lround(list_bounds.width() * 0.35f);
+    const auto title_bounds = views::View::ConvertRectToTarget(
+        title_clip_, root, title_clip_->GetLocalBounds());
+    const int right_target = list_bounds.right() - list_bounds.width() / 5;
+    const int left_target = list_bounds.x() + list_bounds.width() / 5;
+    const int frame_y = std::max(12, rail.y() / 2);
+    const int title_y = title_bounds.y() + 4;
+    const int list_y = list_bounds.bottom() - 10;
+    const int footer_y = rail.bottom() - 4;
     const std::array probes = {
-        gfx::Point(rail.x() + 18, std::max(12, rail.y() / 2)),
+        gfx::Point(rail.x() + 18, frame_y),
         gfx::Point(rail.x() + 18, rail.y() + 4),
         gfx::Point(rail.x() + 4, rail.bottom() - 12),
-        gfx::Point(left_seam - 5, list_bounds.bottom() - 10),
-        gfx::Point(left_seam + 5, list_bounds.bottom() - 10),
-        gfx::Point(right_seam - 5, list_bounds.bottom() - 10),
-        gfx::Point(right_seam + 5, list_bounds.bottom() - 10),
+        gfx::Point(right_target, frame_y),
+        gfx::Point(right_target, title_y),
+        gfx::Point(right_target, list_y),
+        gfx::Point(right_target, footer_y),
+        gfx::Point(left_target, frame_y),
+        gfx::Point(left_target, title_y),
+        gfx::Point(left_target, list_y),
+        gfx::Point(left_target, footer_y),
     };
+    using RailProbes = decltype(probes);
+    using RailSamples = std::array<SkColor, probes.size()>;
     const auto capture = [&] {
-      std::array<SkColor, probes.size()> colors{};
+      RailSamples colors{};
       base::RunLoop loop(base::RunLoop::Type::kNestableTasksAllowed);
       widget->GetCompositor()->root_layer()->RequestCopyOfOutput(
           std::make_unique<viz::CopyOutputRequest>(
               viz::CopyOutputRequest::ResultFormat::RGBA,
               viz::CopyOutputRequest::ResultDestination::kSystemMemory,
-              base::BindOnce([](std::array<SkColor, 7>* colors,
-                                std::array<gfx::Point, 7> probes,
+              base::BindOnce([](RailSamples* colors, RailProbes probes,
                                 gfx::Size root_size, base::OnceClosure done,
                                 std::unique_ptr<viz::CopyOutputResult> result) {
                 const auto pixels = result->ScopedAccessSkBitmap();
@@ -4052,17 +4063,40 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     expect("composited frame, upper sidebar and footer change during the held swipe",
            active_space_id_ == a && visibly_changed(0) && visibly_changed(1) &&
                visibly_changed(2));
-    expect("the composited left swipe has no vertical background seam",
-           dragging[3] == dragging[4] && dragging[3] == dragging[2]);
+    const auto target_is_continuous = [](const RailSamples& colors, size_t first) {
+      return SkColorGetA(colors[first]) == SK_AlphaOPAQUE &&
+             colors[first] == colors[first + 1] &&
+             colors[first] == colors[first + 2] &&
+             colors[first] == colors[first + 3];
+    };
+    expect("the incoming Space matches its upper and lower rails during a left swipe",
+           target_is_continuous(dragging, 3) && dragging[3] == dragging[2]);
     PreviewSpaceSwipe(body_->parent()->width() * 0.35f);
     const auto reversed_colors = capture();
-    expect("the composited right swipe has no vertical background seam",
-           reversed_colors[5] == reversed_colors[6] &&
-               reversed_colors[5] == reversed_colors[2]);
+    expect("the incoming Space matches its upper and lower rails during a right swipe",
+           target_is_continuous(reversed_colors, 7) && reversed_colors[7] == reversed_colors[2]);
     FinishSpaceTransition();
     const auto cancelled = capture();
     expect("all three composited rails return to their initial colors on cancellation",
            idle_colors == cancelled && active_space_id_ == a);
+    const float settling_offset = -body_->parent()->width() * 0.35f;
+    PreviewSpaceSwipe(settling_offset);
+    CompleteSpaceSwipe(settling_offset, /*flick=*/false);
+    const auto landing_colors = capture();
+    expect("the incoming Space and its upper and lower rails share the same transition on lift",
+           settling_swipe_direction_ == 1 && active_space_id_ == a &&
+               target_is_continuous(landing_colors, 3) && landing_colors[3] == landing_colors[2]);
+    base::RunLoop landing(base::RunLoop::Type::kNestableTasksAllowed);
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, landing.QuitClosure(), kSwipeEntryDuration + base::Milliseconds(80));
+    landing.Run();
+    const auto landed_colors = capture();
+    expect("the title, list and footer finish in the destination palette together",
+           active_space_id_ == b && !settling_swipe_direction_ &&
+               target_is_continuous(landed_colors, 3) &&
+               SimilarColors(landed_colors[3], SidebarColor()));
+    SelectSpace(a, /*animate=*/false);
+    Refresh();
   }
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 30);
   send_scroll(-45, 0, ui::EventMomentumPhase::NONE, 40);
