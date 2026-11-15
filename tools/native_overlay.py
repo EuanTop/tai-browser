@@ -42,6 +42,7 @@ BROWSER_VIEW = 'chrome/browser/ui/views/frame/browser_view.cc'
 PAGES = 'chrome/browser/ui/chrome_pages.cc'
 COMMAND_CONTROLLER = 'chrome/browser/ui/browser_command_controller.cc'
 KEY_DISPATCH = 'chrome/browser/ui/cocoa/chrome_command_dispatcher_delegate.mm'
+COCOA_TEXT_INPUT = 'components/remote_cocoa/app_shim/bridged_content_view.mm'
 MULTI_CONTENTS = 'chrome/browser/ui/views/frame/multi_contents_view.cc'
 RELOAD = 'chrome/browser/ui/views/toolbar/reload_button.cc'
 WEBUI_RELOAD = 'chrome/browser/ui/views/toolbar/webui_reload_control.cc'
@@ -422,6 +423,12 @@ def changes():
         '  if (sidebar::RouteShortcut(browser_.get(),\n'
         '          ui::GetAcceleratorFromNativeWebKeyboardEvent(event),\n'
         '          sidebar::ShortcutPhase::kAfterResponder) == sidebar::ShortcutResult::kHandled) return true;\n')
+    cocoa_text = replace_once(
+        upstream(COCOA_TEXT_INPUT).decode(),
+        '    _bridge->text_input_host()->GetFirstRectForRange(gfx::Range(range), &rect,\n'
+        '                                                     &actualRange);',
+        '    _bridge->text_input_host()->GetFirstRectForRange(\n'
+        '        gfx::Range::FromPossiblyInvalidNSRange(range), &rect, &actualRange);')
     key_dispatch = upstream(KEY_DISPATCH).decode()
     key_dispatch = replace_once(key_dispatch,
         '#include "base/check.h"',
@@ -835,7 +842,7 @@ def changes():
         '      url, formatted_url, ChromeAutocompleteSchemeClassifier(GetProfile()), nullptr);\n'
         '  return base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser")\n'
         '      ? sidebar::DisplayTaiURL(url, std::move(formatted)) : formatted;')
-    return {**settings_overlay.changes(upstream, replace_once), **global_search_changes(), OMNIBOX_INPUT: omni_input.encode(), SCHEME_CLASSIFIER: scheme.encode(), LOCATION_IDENTITY: identity.encode(), PAGES: pages.encode(), COMMAND_CONTROLLER: controller.encode(), KEY_DISPATCH: key_dispatch.encode(), **reload_sources, ext_toolbar_path: ext_toolbar.encode(), panel_path: panel.encode(), themed_path: themed.encode(), main_bg_path: main_bg.encode(), mac_path: mac.encode(), OMNIBOX: omnibox.encode(), FOCUS: focus.encode(), BINDERS: binders.encode(), PANEL_IDS: panel_ids.encode(), PANEL_ID_IMPL: panel_impl.encode(), UNTRUSTED: untrusted.encode(), BUILD: build.encode(), WEBUI: webui.encode(), REGION: region.encode(), STATE: state.encode(),
+    return {**settings_overlay.changes(upstream, replace_once), **global_search_changes(), OMNIBOX_INPUT: omni_input.encode(), SCHEME_CLASSIFIER: scheme.encode(), LOCATION_IDENTITY: identity.encode(), PAGES: pages.encode(), COMMAND_CONTROLLER: controller.encode(), KEY_DISPATCH: key_dispatch.encode(), COCOA_TEXT_INPUT: cocoa_text.encode(), **reload_sources, ext_toolbar_path: ext_toolbar.encode(), panel_path: panel.encode(), themed_path: themed.encode(), main_bg_path: main_bg.encode(), mac_path: mac.encode(), OMNIBOX: omnibox.encode(), FOCUS: focus.encode(), BINDERS: binders.encode(), PANEL_IDS: panel_ids.encode(), PANEL_ID_IMPL: panel_impl.encode(), UNTRUSTED: untrusted.encode(), BUILD: build.encode(), WEBUI: webui.encode(), REGION: region.encode(), STATE: state.encode(),
             COMMANDS: commands.encode(), RESTORE: restore.encode(), SESSION_RESTORE: session_restore.encode(), SESSION_SERVICE: session_service.encode(), CONTEXT: context.encode(), TOOLBAR: toolbar.encode(), LOCATION: location.encode(), WIDGET: widget.encode(), BROWSER_VIEW: browser_view.encode(), MULTI_CONTENTS: multi_contents.encode()}
 
 
