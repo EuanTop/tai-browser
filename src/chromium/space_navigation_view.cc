@@ -18,6 +18,7 @@
 #include "chrome/browser/extensions/extension_url_overrides.h"
 #endif
 #include <algorithm>
+#include <iterator>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -54,18 +55,23 @@
 #include "ui/base/dragdrop/drop_target_event.h"
 #include "ui/base/dragdrop/os_exchange_data.h"
 #include "ui/compositor/layer.h"
+#include "ui/compositor/compositor.h"
 #include "ui/compositor/layer_solid_color.h"
 #include "ui/compositor/layer_tree_owner.h"
 #include "ui/compositor/scoped_layer_animation_settings.h"
 #include "ui/gfx/animation/animation.h"
 #include "ui/gfx/animation/animation_delegate.h"
+#include "ui/gfx/animation/linear_animation.h"
 #include "ui/gfx/animation/slide_animation.h"
 #include "ui/gfx/geometry/transform.h"
 #include "ui/views/animation/animation_builder.h"
+#include "ui/views/animation/animation_delegate_views.h"
 #include "ui/gfx/canvas.h"
+#include "ui/gfx/codec/png_codec.h"
 #include "ui/gfx/color_utils.h"
 #include "ui/views/button_drag_utils.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
+#include "ui/views/controls/button/md_text_button.h"
 #include "ui/views/widget/widget.h"
 #include "base/command_line.h"
 #include "base/files/file_util.h"
@@ -87,8 +93,11 @@
 #include "chrome/browser/sessions/tab_restore_service_factory.h"
 #include "chrome/browser/ui/browser_live_tab_context.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/dialogs/browser_dialogs.h"
+#include "ui/base/models/dialog_model.h"
 #include "chrome/browser/ui/view_ids.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
 #include "chrome/browser/ui/navigator/browser_navigator.h"
 #include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
@@ -97,6 +106,7 @@
 #include "components/sessions/content/session_tab_helper.h"
 #include "components/sessions/core/tab_restore_service.h"
 #include "components/vector_icons/vector_icons.h"
+#include "components/viz/common/frame_sinks/copy_output_request.h"
 #include "components/viz/common/frame_sinks/copy_output_result.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/color/color_provider_key.h"
@@ -116,6 +126,7 @@
 #include "sidebar_browser/workspace_state.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/models/image_model.h"
+#include "ui/base/resource/resource_bundle.h"
 #include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/events/event.h"
 #include "ui/gfx/image/image.h"
@@ -134,6 +145,7 @@
 #include "ui/views/controls/separator.h"
 #include "ui/views/controls/textfield/textfield.h"
 #include "ui/views/view_tracker.h"
+#include "ui/views/window/non_client_view.h"
 #include "ui/views/view_class_properties.h"
 #include "ui/views/view_observer.h"
 #include "ui/views/view_utils.h"
@@ -155,10 +167,26 @@ constexpr float kSwipeEdgeGive = 40.f;
 constexpr auto kSwipeEntryDuration = base::Milliseconds(240);
 constexpr auto kSwipeReturnDuration = base::Milliseconds(180);
 constexpr int kRename = 1, kFolder = 2, kSave = 3, kFavorite = 4,
-              kRemove = 5, kClose = 6, kNewSpace = 7, kMoveRoot = 8, kAppearance = 9, kNewWindow = 10, kSettings = 11, kSpaceIcon = 12,
+              kRemove = 5, kClose = 6, kNewSpace = 7, kMoveRoot = 8, kAppearance = 9, kNewWindow = 10, kSpaceIcon = 12,
               kToggleFolder = 13, kCloseFolderTabs = 14, kMoveFolderToSpace = 15,
-              kMoveFolderBase = 100, kSwitchSpaceBase = 100000,
-              kMoveFolderToSpaceBase = 200000;
+              kMoveFolderBase = 100,
+              kMoveFolderToSpaceBase = 200000, kAllSpaces = 17,
+              kRemoveSpace = 20, kPreviousSpace = 21, kNextSpace = 22;
+
+const WorkspaceSpace* SpaceRemovalTarget(const WorkspaceModel& model,
+                                         const std::string& id) {
+  const auto& spaces = model.spaces();
+  const auto source = std::ranges::find(spaces, id, &WorkspaceSpace::id);
+  if (source == spaces.end()) return nullptr;
+  const auto same_profile = [&](const WorkspaceSpace& space) {
+    return space.profile_key == source->profile_key;
+  };
+  const auto next = std::find_if(std::next(source), spaces.end(), same_profile);
+  if (next != spaces.end()) return &*next;
+  const auto preceding = std::find_if(std::make_reverse_iterator(source),
+                                      spaces.rend(), same_profile);
+  return preceding == spaces.rend() ? nullptr : &*preceding;
+}
 std::string NewId() { return base::Uuid::GenerateRandomV4().AsLowercaseString(); }
 // The pinned Chromium keeps 25 recently closed entries. Keep each clear below
 // that limit rather than silently claiming that an arbitrary batch is undoable.
@@ -257,7 +285,8 @@ class SidebarButton : public views::LabelButton {
  public:
   using views::LabelButton::label;
   SidebarButton(PressedCallback callback, std::u16string text, bool selected,
-                bool dark, int radius = 8, bool paint_background = true)
+                bool dark, int radius = 8, bool paint_background = true,
+                bool emphasized = false)
       : views::LabelButton(std::move(callback), text),
         selected_(selected), dark_(dark), radius_(radius),
         paint_background_(paint_background) {
@@ -265,7 +294,12 @@ class SidebarButton : public views::LabelButton {
     SetImageLabelSpacing(text.empty() ? 0 : 10);
     SetBorder(views::CreateEmptyBorder(gfx::Insets::VH(6, 9)));
     SetMinSize(gfx::Size(0, 38));
-    label()->SetFontList(label()->font_list().DeriveWithSizeDelta(2));
+    auto font = views::TypographyProvider::Get().GetFontDetails(
+        views::style::CONTEXT_BUTTON, views::style::STYLE_PRIMARY);
+    font.size_delta += 2;
+    if (emphasized) font.weight = gfx::Font::Weight::SEMIBOLD;
+    label()->SetFontList(ui::ResourceBundle::GetSharedInstance()
+                             .GetFontListForDetails(font));
     label()->SetElideBehavior(gfx::ELIDE_TAIL);
     label()->SetSubpixelRenderingEnabled(false);
     // Colors follow the Space palette, including in inactive windows.
@@ -274,7 +308,27 @@ class SidebarButton : public views::LabelButton {
     SetEnabledTextColors(dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53));
     UpdateBackground();
   }
+  void SetRowTooltip(const std::u16string& title) {
+    label()->SetHandlesTooltips(false);
+    // A custom tooltip also prevents the label from measuring the text again
+    // on bounds changes, even when tooltip handling is disabled on it.
+    label()->SetCustomTooltipText(title);
+    SetTooltipText(title);
+  }
   void SetDropMark(int mark) { drop_mark_ = mark; SchedulePaint(); }
+  virtual void SetDark(bool dark) {
+    if (dark_ == dark) return;
+    dark_ = dark;
+    const SkColor ink = dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53);
+    SetEnabledTextColors(ink);
+    if (auto image = GetImageModel(STATE_NORMAL); image && image->IsVectorIcon()) {
+      const auto icon = image->GetVectorIcon();
+      SetImageModel(STATE_NORMAL, ui::ImageModel::FromVectorIcon(
+          *icon.vector_icon(), ink, icon.icon_size()));
+    }
+    UpdateBackground();
+    SchedulePaint();
+  }
   void PaintButtonContents(gfx::Canvas* canvas) override {
     views::LabelButton::PaintButtonContents(canvas);
     if (!drop_mark_) return;
@@ -289,6 +343,9 @@ class SidebarButton : public views::LabelButton {
   void StateChanged(ButtonState old) override {
     views::LabelButton::StateChanged(old); UpdateBackground();
   }
+ protected:
+  bool dark() const { return dark_; }
+
  private:
   void UpdateBackground() {
     if (!paint_background_) return;
@@ -300,7 +357,8 @@ class SidebarButton : public views::LabelButton {
     } else { SetBackground(nullptr); }
   }
   int drop_mark_ = 0;
-  const bool selected_, dark_;
+  const bool selected_;
+  bool dark_;
   const int radius_;
   const bool paint_background_;
 };
@@ -317,15 +375,22 @@ class TabRowCloseButton final : public views::ImageButton {
  public:
   TabRowCloseButton(PressedCallback callback, bool saved, SkColor ink,
                     std::u16string label)
-      : views::ImageButton(std::move(callback)), ink_(ink) {
+      : views::ImageButton(std::move(callback)), saved_(saved), ink_(ink) {
     SetImageHorizontalAlignment(ALIGN_CENTER);
     SetImageVerticalAlignment(ALIGN_MIDDLE);
     SetImageModel(STATE_NORMAL, ui::ImageModel::FromVectorIcon(
-                                    saved ? kRemoveIcon : kCloseIcon, ink, 14));
+                                    saved_ ? kRemoveIcon : kCloseIcon, ink, 14));
     SetTooltipText(label);
     GetViewAccessibility().SetName(label);
     SetFocusBehavior(FocusBehavior::ALWAYS);
     SetRequestFocusOnPress(false);
+  }
+
+  void SetInk(SkColor ink) {
+    ink_ = ink;
+    SetImageModel(STATE_NORMAL, ui::ImageModel::FromVectorIcon(
+                                    saved_ ? kRemoveIcon : kCloseIcon, ink_, 14));
+    SchedulePaint();
   }
 
  private:
@@ -345,7 +410,8 @@ class TabRowCloseButton final : public views::ImageButton {
     canvas->DrawCircle(gfx::PointF(GetLocalBounds().CenterPoint()), 10, flags);
   }
 
-  const SkColor ink_;
+  const bool saved_;
+  SkColor ink_;
 };
 BEGIN_METADATA(TabRowCloseButton)
 END_METADATA
@@ -366,7 +432,7 @@ class TabRow final : public views::View, public views::ViewObserver {
         std::move(activate), collapsed ? std::u16string() : title,
         false, dark, 8, false));
     if (close) title_button_->SetFocusBehavior(FocusBehavior::ALWAYS);
-    title_button_->SetTooltipText(title);
+    title_button_->SetRowTooltip(title);
     if (collapsed) {
       title_button_->GetViewAccessibility().SetName(title);
     } else {
@@ -394,6 +460,15 @@ class TabRow final : public views::View, public views::ViewObserver {
   }
 
   SidebarButton* title_button() const { return title_button_; }
+
+  void SetDark(bool dark) {
+    if (dark_ == dark) return;
+    dark_ = dark;
+    title_button_->SetDark(dark);
+    if (close_button_)
+      close_button_->SetInk(dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53));
+    SchedulePaint();
+  }
 
  private:
   void OnBoundsChanged(const gfx::Rect& previous_bounds) override {
@@ -445,7 +520,7 @@ class TabRow final : public views::View, public views::ViewObserver {
   }
 
   const bool selected_;
-  const bool dark_;
+  bool dark_;
   bool hovered_ = false;
   raw_ptr<SidebarButton> title_button_;
   raw_ptr<TabRowCloseButton> close_button_ = nullptr;
@@ -458,9 +533,14 @@ class NewTabButton final : public SidebarButton {
   METADATA_HEADER(NewTabButton, SidebarButton)
  public:
   NewTabButton(PressedCallback callback, std::u16string label, bool dark)
-      : SidebarButton(std::move(callback), std::move(label), false, dark, 14),
-        ink_(dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53)) {
+      : SidebarButton(std::move(callback), std::move(label), false, dark, 14) {
     SetMinSize(gfx::Size(0, 40));
+    UpdateInk();
+  }
+
+  void SetDark(bool dark) override {
+    if (this->dark() == dark) return;
+    SidebarButton::SetDark(dark);
     UpdateInk();
   }
 
@@ -480,12 +560,11 @@ class NewTabButton final : public SidebarButton {
   void UpdateInk() {
     const bool emphasized = HasFocus() || GetState() == STATE_HOVERED ||
                             GetState() == STATE_PRESSED;
-    const SkColor color = emphasized ? ink_ : SkColorSetA(ink_, 160);
+    const SkColor ink = dark() ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53);
+    const SkColor color = emphasized ? ink : SkColorSetA(ink, 160);
     SetEnabledTextColors(color);
     SetImageModel(STATE_NORMAL, ui::ImageModel::FromVectorIcon(kAddIcon, color, 20));
   }
-
-  const SkColor ink_;
 };
 BEGIN_METADATA(NewTabButton)
 END_METADATA
@@ -496,7 +575,7 @@ class SpaceDockButton final : public SidebarButton {
   SpaceDockButton(PressedCallback callback, std::u16string icon,
                   bool selected, bool compact, bool dark)
       : SidebarButton(std::move(callback), std::move(icon), selected, dark),
-        compact_(compact), dark_(dark) {
+        compact_(compact) {
     const gfx::Size size(compact ? 15 : 32, 32);
     SetBorder(views::CreateEmptyBorder(gfx::Insets()));
     SetMinSize(size);
@@ -532,7 +611,7 @@ class SpaceDockButton final : public SidebarButton {
     const float value = reveal_.GetCurrentValue();
     cc::PaintFlags flags;
     flags.setAntiAlias(true);
-    flags.setColor(SkColorSetA(dark_ ? SK_ColorWHITE : SkColorSetRGB(40, 47, 81),
+    flags.setColor(SkColorSetA(dark() ? SK_ColorWHITE : SkColorSetRGB(40, 47, 81),
                               static_cast<uint8_t>(154 * (1.f - value))));
     canvas->DrawCircle(gfx::PointF(width() / 2.f, height() / 2.f),
                        2.5f - value, flags);
@@ -563,7 +642,6 @@ class SpaceDockButton final : public SidebarButton {
   }
 
   const bool compact_;
-  const bool dark_;
   gfx::SlideAnimation reveal_{this};
 };
 BEGIN_METADATA(SpaceDockButton)
@@ -647,12 +725,53 @@ const ui::ClipboardFormatType& SidebarDragFormat() {
       ui::ClipboardFormatType::CustomPlatformType("org.sidebar-browser.tab"));
   return *format;
 }
-// One widget-space spectrum, shared by frame and sidebar. A vertical wash
-// keeps the reading area calm without reducing Pride to a purple solid fill.
+// Anchor the middle stop to the chosen color. The neighboring hues fan out
+// around it with softer chroma near neutral colors and more light at the
+// leading edge. Blend whole palettes during a swipe to avoid reinterpreting
+// the hue when two complementary colors pass through gray.
+SidebarBackdropColors MakeSidebarBackdrop(SkColor color, bool pride) {
+  SidebarBackdropColors colors{color, {}};
+  colors.stops.fill(color);
+  if (!pride) return colors;
+  color_utils::HSL seed;
+  color_utils::SkColorToHSL(color, &seed);
+  const double hue = seed.s < 0.07 ? 0.70 : seed.h;
+  const double saturation = std::clamp(seed.s * 0.68 + 0.24, 0.32, 0.75);
+  const double spread = 0.87 + seed.s * 0.2;
+  const bool dark = color_utils::IsDark(color);
+  const SkColor ink = dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53);
+  const float contrast = std::min(color_utils::kMinimumReadableContrastRatio,
+                                  color_utils::GetContrastRatio(ink, color));
+  constexpr std::array hue_offsets{-0.16, -0.07, 0.0, 0.085, 0.18};
+  constexpr std::array light_offsets{0.075, 0.038, 0.0, 0.022, -0.040};
+  for (size_t i = 0; i < colors.stops.size(); ++i) {
+    if (i == colors.stops.size() / 2) continue;
+    const double lightness = std::clamp(seed.l + light_offsets[i], 0.09, 0.95);
+    const SkColor tint = color_utils::HSLToSkColor(
+        {std::fmod(hue + hue_offsets[i] * spread + 1, 1), saturation, lightness},
+        SK_AlphaOPAQUE);
+    colors.stops[i] = color_utils::BlendForMinContrast(
+        color_utils::AlphaBlend(tint, color, 0.64f), ink,
+        dark ? SK_ColorBLACK : SK_ColorWHITE, contrast).color;
+  }
+  return colors;
+}
+
+SidebarBackdropColors BlendSidebarBackdrops(const SidebarBackdropColors& from,
+                                             const SidebarBackdropColors& to,
+                                             double progress) {
+  SidebarBackdropColors colors{gfx::Tween::ColorValueBetween(progress, from.base, to.base), {}};
+  for (size_t i = 0; i < colors.stops.size(); ++i) {
+    colors.stops[i] = gfx::Tween::ColorValueBetween(progress, from.stops[i], to.stops[i]);
+  }
+  return colors;
+}
+
 void PaintSidebarBackdrop(gfx::Canvas* canvas, const views::View* view,
                           const SpaceNavigationView* sidebar,
                           const SkPath* path = nullptr) {
-  cc::PaintFlags flags; flags.setAntiAlias(true); flags.setColor(sidebar->SidebarColor());
+  const auto colors = sidebar->BackdropColors();
+  cc::PaintFlags flags; flags.setAntiAlias(true); flags.setColor(colors.base);
   const auto draw = [&] { if (path) canvas->DrawPath(*path, flags); else canvas->DrawRect(view->GetLocalBounds(), flags); };
   if (!sidebar->HasPrideBackdrop() || !view->GetWidget()) { draw(); return; }
   gfx::Point origin;
@@ -662,23 +781,23 @@ void PaintSidebarBackdrop(gfx::Canvas* canvas, const views::View* view,
                                     &sidebar_origin);
   const float start = sidebar_origin.x() - origin.x();
   const float width = std::max(1, sidebar->width());
-  const SkPoint points[] = {{start, 0}, {start + width, 0}};
-  const bool dark = sidebar->IsDark();
-  const std::array<SkColor,6> light = {0xFFEBD7E2,0xFFF4DEC9,0xFFF0E8C9,0xFFD5E9DE,0xFFC9DDF3,0xFFE0D2F2};
-  const std::array<SkColor,6> night = {0xFF493446,0xFF524137,0xFF494631,0xFF2B473D,0xFF31466A,0xFF45345D};
-  std::array<SkColor4f,6> spectrum;
-  for (int i=0;i<6;++i) spectrum[i] = SkColor4f::FromColor(dark ? night[i] : light[i]);
+  const float center = sidebar_origin.y() - origin.y() + sidebar->height() / 2.f;
+  const SkPoint points[] = {{start, center - width * 0.07f},
+                            {start + width, center + width * 0.07f}};
+  std::array<SkColor4f, 5> spectrum;
+  std::ranges::transform(colors.stops, spectrum.begin(), SkColor4f::FromColor);
   flags.setColor(SK_ColorWHITE);
-  flags.setShader(cc::PaintShader::MakeLinearGradient(points,spectrum.data(),nullptr,6,SkTileMode::kClamp)); draw();
-  const auto base = sidebar->SidebarColor();
-  const SkColor4f wash[] = {SkColor4f::FromColor(SkColorSetA(base,55)), SkColor4f::FromColor(base)};
-  const SkPoint vertical[] = {{0,-static_cast<float>(origin.y())},{0,580.0f-origin.y()}};
-  flags.setShader(cc::PaintShader::MakeLinearGradient(vertical,wash,nullptr,2,SkTileMode::kClamp)); draw();
+  flags.setShader(cc::PaintShader::MakeLinearGradient(
+      points, spectrum.data(), nullptr, spectrum.size(), SkTileMode::kClamp));
+  draw();
 }
 class SidebarBackdrop final : public views::Background {
  public:
   explicit SidebarBackdrop(SpaceNavigationView* sidebar) : sidebar_(sidebar) {}
-  void Paint(gfx::Canvas* canvas, views::View* view) const override { PaintSidebarBackdrop(canvas,view,sidebar_); }
+  void Paint(gfx::Canvas* canvas, views::View* view) const override {
+    PaintSidebarBackdrop(canvas, view, sidebar_);
+  }
+
  private:
   raw_ptr<SpaceNavigationView> sidebar_;
 };
@@ -689,42 +808,146 @@ class SidebarBackdrop final : public views::Background {
 constexpr std::pair<ui::ColorId, std::string_view> kChromePaletteColors[] = {CHROME_COLOR_IDS};
 #include "ui/color/color_id_map_macros.inc"
 constexpr int kPageAccentHues = 12;
+constexpr int kAtriumAccent = kPageAccentHues;
+constexpr int kPrideAccent = kAtriumAccent + 1;
+constexpr int kAccentCount = kPrideAccent + 1;
+
+double AccentHue(int accent) {
+  if (accent == kAtriumAccent) accent = 8;
+  if (accent == kPrideAccent) accent = 9;
+  return (accent + 0.5) / kPageAccentHues;
+}
+
+SkColor AccentColor(int accent, bool dark) {
+  return color_utils::HSLToSkColor(
+      {AccentHue(accent), 0.43, dark ? 0.76 : 0.36}, SK_AlphaOPAQUE);
+}
 
 int PageAccentIndex(SkColor canvas, SkColor space_color, bool pride) {
   const auto channels = {SkColorGetR(canvas), SkColorGetG(canvas), SkColorGetB(canvas)};
   const auto [low, high] = std::minmax(channels);
   if (high - low >= 20) space_color = canvas;
-  if (!space_color) return pride ? 9 : 8;
+  const int fallback = pride ? kPrideAccent : kAtriumAccent;
+  if (!space_color) return fallback;
   color_utils::HSL hsl;
   color_utils::SkColorToHSL(space_color, &hsl);
   return hsl.s >= 0.08 ? static_cast<int>(hsl.h * kPageAccentHues) % kPageAccentHues
-                       : (pride ? 9 : 8);
+                       : fallback;
 }
+
+bool UsesSystemContrast(const ui::ColorProviderKey& key) {
+  return key.contrast_mode == ui::ColorProviderKey::ContrastMode::kHigh ||
+         key.forced_colors != ui::ColorProviderKey::ForcedColors::kNone;
+}
+
+SkColor BrandActionColor(int accent, bool dark) {
+  if (accent == kAtriumAccent) return dark ? 0xffaaa1dc : 0xff39375f;
+  if (accent == kPrideAccent) return dark ? 0xffc9aff1 : 0xff5e477b;
+  return color_utils::HSLToSkColor(
+      {AccentHue(accent), 0.38, dark ? 0.77 : 0.32}, SK_AlphaOPAQUE);
+}
+
+SkColor BrandActionTextColor(bool dark) {
+  return dark ? 0xff1c1d31 : SK_ColorWHITE;
+}
+
+void AddBrandAccents(ui::ColorMixer& mixer, bool dark, int accent) {
+  // Atrium uses the same action colors as TAi Settings. Custom Space
+  // colors contribute their hue while the controls retain readable contrast.
+  const SkColor action = BrandActionColor(accent, dark);
+  const SkColor on_action = BrandActionTextColor(dark);
+  const auto tonal = ui::AlphaBlend(ui::kColorSysPrimary, ui::kColorSysSurface,
+                                    dark ? 58 : 24);
+  mixer[ui::kColorSysPrimary] = {action};
+  mixer[ui::kColorSysOnPrimary] = {on_action};
+  mixer[ui::kColorSysSecondary] = {action};
+  mixer[ui::kColorSysOnSecondary] = {on_action};
+  mixer[ui::kColorSysPrimaryContainer] = {tonal};
+  mixer[ui::kColorSysSecondaryContainer] = {tonal};
+  mixer[ui::kColorSysTonalContainer] = {tonal};
+  mixer[ui::kColorSysOnPrimaryContainer] = {ui::kColorSysOnSurface};
+  mixer[ui::kColorSysOnSecondaryContainer] = {ui::kColorSysOnSurface};
+  mixer[ui::kColorSysOnTonalContainer] = {ui::kColorSysOnSurface};
+  mixer[ui::kColorSysTonalOutline] = {
+      ui::AlphaBlend(ui::kColorSysPrimary, ui::kColorSysSurface, 105)};
+  mixer[ui::kColorSysStateRipplePrimary] = {SkColorSetA(action, 0x42)};
+  mixer[ui::kColorSysStateTextHighlight] = {action};
+  mixer[ui::kColorSysStateOnTextHighlight] = {on_action};
+  mixer[ui::kColorAccent] = {action};
+  mixer[ui::kColorTextSelectionBackground] = {tonal};
+  mixer[ui::kColorTextSelectionForeground] = {ui::kColorSysOnSurface};
+}
+
+class SearchPalette final : public ui::ColorProviderKey::InitializerSupplier {
+ public:
+  explicit SearchPalette(int accent) : accent_(accent) {}
+
+  void AddColorMixers(ui::ColorProvider* provider,
+                      const ui::ColorProviderKey& key) const override {
+    if (UsesSystemContrast(key)) return;
+    const bool dark = key.color_mode == ui::ColorProviderKey::ColorMode::kDark;
+    const SkColor accent = AccentColor(accent_, dark);
+    auto& mixer = provider->AddMixer();
+    AddBrandAccents(mixer, dark, accent_);
+    mixer[ui::kColorSysStateFocusRing] = {accent};
+    mixer[kColorSearchboxResultsFocusIndicator] = {accent};
+    mixer[kColorSearchboxResultsIconFocusedOutline] = {accent};
+    mixer[kColorSearchboxResultsActionChipFocusOutline] = {accent};
+    mixer[kColorNewTabPageComposeboxSubmitButtonBackground] = {ui::kColorSysPrimary};
+  }
+
+ private:
+  const int accent_;
+};
+
+enum class ToolbarPalette { kNative, kLightPage, kDarkPage, kCount };
 
 class PageChromePalette final : public ui::ColorProviderKey::InitializerSupplier {
  public:
-  PageChromePalette(bool dark, int accent) : dark_(dark),
-      focus_color_(color_utils::HSLToSkColor(
-          {(accent + 0.5) / kPageAccentHues, 0.43, dark ? 0.76 : 0.36},
-          SK_AlphaOPAQUE)) {}
+  PageChromePalette(ToolbarPalette toolbar, int page_accent, int space_accent)
+      : toolbar_(toolbar), page_accent_(page_accent), space_accent_(space_accent) {}
   void AddColorMixers(ui::ColorProvider* provider, const ui::ColorProviderKey& key) const override {
+    if (UsesSystemContrast(key)) return;
+    const bool dark = key.color_mode == ui::ColorProviderKey::ColorMode::kDark;
+    auto& mixer = provider->AddMixer();
+    AddBrandAccents(mixer, dark, space_accent_);
+    const SkColor focus = AccentColor(space_accent_, dark);
+    mixer[ui::kColorFocusableBorderFocused] = {focus};
+    mixer[ui::kColorSysStateFocusRing] = {focus};
+    // The address bar keeps page-edge contrast while browser actions use the Space.
+    const bool dark_toolbar = toolbar_ == ToolbarPalette::kNative
+                                  ? dark : toolbar_ == ToolbarPalette::kDarkPage;
+    if (toolbar_ != ToolbarPalette::kNative) {
+      ApplyToolbarContrast(mixer, key, dark_toolbar);
+    }
+    const SkColor toolbar_action = BrandActionColor(space_accent_, dark_toolbar);
+    const SkColor toolbar_focus = AccentColor(page_accent_, dark_toolbar);
+    mixer[kColorOmniboxResultsFocusIndicator] = {toolbar_focus};
+    mixer[kColorOmniboxResultsUrl] = {toolbar_action};
+    mixer[kColorOmniboxResultsUrlSelected] = {kColorOmniboxResultsUrl};
+    mixer[kColorOmniboxKeywordSelected] = {kColorOmniboxResultsUrl};
+    mixer[kColorOmniboxComposeboxPrimaryAction] = {toolbar_action};
+    mixer[kColorOmniboxComposeboxSubmitButtonIcon] = {BrandActionTextColor(dark_toolbar)};
+    mixer[kColorToolbarFeaturePromoHighlight] = {toolbar_action};
+  }
+
+ private:
+  void ApplyToolbarContrast(ui::ColorMixer& mixer, const ui::ColorProviderKey& key,
+                            bool dark_page) const {
     auto reference_key = key;
     reference_key.app_controller = nullptr;
-    reference_key.color_mode = dark_ ? ui::ColorProviderKey::ColorMode::kDark
-                                     : ui::ColorProviderKey::ColorMode::kLight;
+    reference_key.color_mode = dark_page ? ui::ColorProviderKey::ColorMode::kDark
+                                          : ui::ColorProviderKey::ColorMode::kLight;
     const auto* reference = ui::ColorProviderManager::Get().GetColorProviderFor(reference_key);
-    auto& mixer = provider->AddMixer();
     for (const auto& [id, name] : kChromePaletteColors) {
       if (name.starts_with("kColorToolbar") || name.starts_with("kColorOmnibox") ||
           name.starts_with("kColorLocationBar")) mixer[id] = {reference->GetColor(id)};
     }
-    // Views and the WebUI toolbar use different Chromium focus tokens.
-    mixer[ui::kColorFocusableBorderFocused] = {focus_color_};
-    mixer[ui::kColorSysStateFocusRing] = {focus_color_};
   }
- private:
-  const bool dark_;
-  const SkColor focus_color_;
+
+  const ToolbarPalette toolbar_;
+  const int page_accent_;
+  const int space_accent_;
 };
 class PageChromeEdgeBackground final : public views::Background {
  public:
@@ -764,48 +987,130 @@ class SidebarFrameBackground final : public CustomCornersBackground {
   raw_ptr<BrowserView> browser_;
   const bool toolbar_;
 };
-class SpaceAppearanceBubble final : public views::BubbleDialogDelegate {
+class SpaceAppearanceBubble final : public views::BubbleDialogDelegate,
+                                    public views::TextfieldController {
  public:
-  SpaceAppearanceBubble(Profile* profile, views::View* anchor, std::string value,
-                       base::RepeatingCallback<bool(std::string)> apply)
-      : views::BubbleDialogDelegate(anchor, views::BubbleBorder::TOP_LEFT), profile_(profile) {
-    SetTitle(LocalizedText16(profile_, "Space 颜色", "Space color"));
-    SetButtonLabel(ui::mojom::DialogButton::kOk, LocalizedText16(profile_, "应用", "Apply"));
-    SetButtonLabel(ui::mojom::DialogButton::kCancel, LocalizedText16(profile_, "取消", "Cancel"));
+  SpaceAppearanceBubble(Profile* profile, views::View* anchor,
+                        std::u16string space_label, std::string value,
+                        SkColor default_color,
+                        base::RepeatingCallback<bool(std::string)> apply)
+      : views::BubbleDialogDelegate(anchor, views::BubbleBorder::TOP_LEFT),
+        default_color_(default_color) {
+    SetTitle(LocalizedText16(profile, "Space 颜色", "Space color"));
+    SetButtonLabel(ui::mojom::DialogButton::kOk,
+                   LocalizedText16(profile, "应用", "Apply"));
+    SetButtonLabel(ui::mojom::DialogButton::kCancel,
+                   LocalizedText16(profile, "取消", "Cancel"));
+    SetButtonStyle(ui::mojom::DialogButton::kOk, ui::ButtonStyle::kTonal);
+    SetButtonStyle(ui::mojom::DialogButton::kCancel, ui::ButtonStyle::kText);
+    set_fixed_width(296);
+    set_corner_radius(18);
+    set_margins(gfx::Insets::VH(12, 16));
+
     auto* contents = SetContentsView(std::make_unique<views::BoxLayoutView>());
     contents->SetOrientation(views::BoxLayout::Orientation::kVertical);
+    contents->SetCrossAxisAlignment(views::BoxLayout::CrossAxisAlignment::kStretch);
     contents->SetBetweenChildSpacing(12);
-    contents->SetInsideBorderInsets(gfx::Insets(8));
-    field_ = contents->AddChildView(std::make_unique<views::Textfield>());
-    field_->SetText(base::UTF8ToUTF16(value)); field_->SetPlaceholderText(u"#RRGGBB");
-    field_->GetViewAccessibility().SetName(LocalizedText16(profile_, "颜色代码（#RRGGBB，留空恢复默认）", "Color code (#RRGGBB; leave empty for default)"));
-    field_->SetPreferredSize(gfx::Size(300, 32));
-    auto* palette = Row(contents, 6);
-    for (const auto* hex : {"#E6E6DE", "#CCDDF2", "#D8CCE9", "#EFCED6",
-                            "#EAD8AC", "#CDDECD", "#52616D", "#35333F"}) {
+
+    preview_ = Row(contents);
+    preview_->SetCrossAxisAlignment(views::BoxLayout::CrossAxisAlignment::kCenter);
+    preview_->SetInsideBorderInsets(gfx::Insets::VH(16, 12));
+    preview_label_ = preview_->AddChildView(
+        std::make_unique<views::Label>(std::move(space_label)));
+    preview_label_->SetHorizontalAlignment(gfx::ALIGN_LEFT);
+    preview_label_->SetElideBehavior(gfx::ELIDE_TAIL);
+    preview_label_->SetAutoColorReadabilityEnabled(false);
+    preview_label_->SetSubpixelRenderingEnabled(false);
+    preview_label_->SetFontList(preview_label_->font_list().DeriveWithWeight(
+        gfx::Font::Weight::SEMIBOLD));
+    preview_->SetFlexForView(preview_label_, 1);
+
+    auto* palette = Row(contents, 7);
+    for (size_t i = 0; i < kSwatches.size(); ++i) {
+      const auto* hex = kSwatches[i];
+      const auto color = *ParseSpaceColor(hex);
       auto* swatch = palette->AddChildView(std::make_unique<views::LabelButton>(
-          base::BindRepeating([](views::Textfield* field, std::string color) {
-            field->SetText(base::UTF8ToUTF16(color));
-          }, base::Unretained(field_.get()), std::string(hex))));
-      swatch->SetPreferredSize(gfx::Size(30, 30)); swatch->SetTooltipText(base::UTF8ToUTF16(hex));
-      swatch->SetBackground(views::CreateRoundedRectBackground(*ParseSpaceColor(hex), 15));
+          base::BindRepeating(&SpaceAppearanceBubble::Choose,
+                              base::Unretained(this), std::string(hex))));
+      swatch->SetPreferredSize(gfx::Size(26, 26));
+      swatch->SetHorizontalAlignment(gfx::ALIGN_CENTER);
+      swatch->SetTooltipText(base::UTF8ToUTF16(hex));
+      swatch->SetBackground(views::CreateRoundedRectBackground(color, 13));
+      swatch->SetEnabledTextColors(color_utils::GetColorWithMaxContrast(color));
+      swatches_[i] = swatch;
     }
-    auto* hint = contents->AddChildView(std::make_unique<views::Label>(LocalizedText16(profile_, "选择色板或输入颜色代码；留空恢复默认。", "Choose a swatch or enter a color code. Leave empty for default.")));
-    hint->SetSubpixelRenderingEnabled(false);
-    error_ = contents->AddChildView(std::make_unique<views::Label>());
-    error_->SetSubpixelRenderingEnabled(false);
+    SetInitiallyFocusedView(swatches_.front());
+
+    auto* controls = Row(contents, 8);
+    controls->SetCrossAxisAlignment(views::BoxLayout::CrossAxisAlignment::kCenter);
+    field_ = controls->AddChildView(std::make_unique<views::Textfield>());
+    field_->SetText(base::UTF8ToUTF16(value));
+    field_->SetPlaceholderText(u"#RRGGBB");
+    field_->GetViewAccessibility().SetName(
+        LocalizedText16(profile, "自定义颜色代码", "Custom color code"));
+    field_->SetPreferredSize(gfx::Size(98, 30));
+    field_->set_controller(this);
+    controls->SetFlexForView(field_, 1);
+    reset_ = controls->AddChildView(std::make_unique<views::MdTextButton>(
+        base::BindRepeating(&SpaceAppearanceBubble::Choose,
+                            base::Unretained(this), std::string()),
+        LocalizedText16(profile, "跟随外观", "Use appearance")));
+    reset_->SetStyle(ui::ButtonStyle::kText);
+    reset_->SetTooltipText(
+        LocalizedText16(profile, "恢复当前外观的颜色", "Use the current appearance color"));
     SetAcceptCallbackWithClose(base::BindRepeating(
-        [](SpaceAppearanceBubble* self, base::RepeatingCallback<bool(std::string)> apply) {
-          auto value = base::UTF16ToUTF8(self->field_->GetText());
-          base::TrimWhitespaceASCII(value, base::TRIM_ALL, &value);
-          if (!ParseSpaceColor(value)) { self->error_->SetText(LocalizedText16(self->profile_, "请输入 #RRGGBB 格式的颜色。", "Enter a color in #RRGGBB format.")); return false; }
-          return apply.Run(std::move(value));
+        [](SpaceAppearanceBubble* self,
+           base::RepeatingCallback<bool(std::string)> apply) {
+          const auto value = self->ColorCode();
+          return ParseSpaceColor(value).has_value() && apply.Run(value);
         }, base::Unretained(this), std::move(apply)));
+    UpdatePreview();
   }
+
  private:
-  raw_ptr<Profile> profile_;
-  raw_ptr<views::Textfield> field_;
-  raw_ptr<views::Label> error_;
+  inline static constexpr std::array<const char*, 8> kSwatches = {
+      "#E6E6DE", "#CCDDF2", "#D8CCE9", "#EFCED6",
+      "#EAD8AC", "#CDDECD", "#52616D", "#35333F"};
+
+  std::string ColorCode() const {
+    auto value = base::UTF16ToUTF8(field_->GetText());
+    base::TrimWhitespaceASCII(value, base::TRIM_ALL, &value);
+    return value;
+  }
+
+  void ContentsChanged(views::Textfield*, const std::u16string&) override {
+    UpdatePreview();
+  }
+
+  void Choose(std::string value) {
+    field_->SetText(base::UTF8ToUTF16(value));
+    UpdatePreview();
+  }
+
+  void UpdatePreview() {
+    const auto color = ParseSpaceColor(ColorCode());
+    field_->SetInvalid(!color);
+    SetButtonEnabled(ui::mojom::DialogButton::kOk, color.has_value());
+    reset_->SetEnabled(color != 0);
+    if (!color) return;
+    const auto paint = *color ? *color : default_color_;
+    preview_->SetBackground(views::CreateRoundedRectBackground(paint, 10));
+    preview_label_->SetEnabledColor(color_utils::GetColorWithMaxContrast(paint));
+    for (size_t i = 0; i < kSwatches.size(); ++i) {
+      const bool selected = color == ParseSpaceColor(kSwatches[i]);
+      auto* swatch = swatches_[i].get();
+      swatch->SetText(selected ? u"✓" : u"");
+      swatch->GetViewAccessibility().SetName(base::UTF8ToUTF16(kSwatches[i]));
+      swatch->GetViewAccessibility().SetIsSelected(selected);
+    }
+  }
+
+  const SkColor default_color_;
+  std::array<raw_ptr<views::LabelButton>, kSwatches.size()> swatches_{};
+  raw_ptr<views::BoxLayoutView> preview_ = nullptr;
+  raw_ptr<views::Label> preview_label_ = nullptr;
+  raw_ptr<views::Textfield> field_ = nullptr;
+  raw_ptr<views::MdTextButton> reset_ = nullptr;
 };
 
 }  // namespace
@@ -1067,6 +1372,56 @@ DEFINE_USER_DATA(SpaceNavigationView);
 SpaceNavigationView* SpaceNavigationView::From(BrowserWindowInterface* browser) {
   return browser ? Get(browser->GetUnownedUserDataHost()) : nullptr;
 }
+class SpaceNavigationView::SwipeBackdropAnimation final
+    : public views::AnimationDelegateViews {
+ public:
+  SwipeBackdropAnimation(SpaceNavigationView& sidebar, base::TimeDelta duration,
+                         SidebarBackdropColors from, SidebarBackdropColors to)
+      : views::AnimationDelegateViews(&sidebar), sidebar_(&sidebar), from_(from), to_(to),
+        animation_(duration, gfx::LinearAnimation::kDefaultFrameRate, this) {
+    animation_.Start();
+  }
+
+ private:
+  void AnimationProgressed(const gfx::Animation* animation) override {
+    sidebar_->SetSwipeBackdrop(BlendSidebarBackdrops(
+        from_, to_, gfx::Tween::CalculateValue(gfx::Tween::EASE_OUT,
+                                               animation->GetCurrentValue())));
+  }
+
+  const raw_ptr<SpaceNavigationView> sidebar_;
+  const SidebarBackdropColors from_;
+  const SidebarBackdropColors to_;
+  gfx::LinearAnimation animation_;
+};
+
+struct SpaceNavigationView::RenderState {
+  struct Tab {
+    int32_t handle;
+    std::string item_id;
+    std::u16string title;
+    gfx::Image icon;
+    bool selected;
+    bool operator==(const Tab&) const = default;
+  };
+
+  std::string space;
+  std::string revision;
+  std::string editor;
+  SkColor sidebar_color;
+  std::optional<bool> toolbar_dark;
+  SpaceDockLayout dock_layout;
+  unsigned favicon_generation;
+  bool collapsed;
+  bool clear_pending;
+  int cleared = 0;
+  int kept = 0;
+  std::optional<size_t> recoverable;
+  std::vector<Tab> tabs;
+
+  bool operator==(const RenderState&) const = default;
+};
+
 SpaceNavigationView::SpaceNavigationView(
     BrowserWindowInterface* browser,
     tabs::VerticalTabStripStateController* state_controller)
@@ -1076,6 +1431,7 @@ SpaceNavigationView::SpaceNavigationView(
       scoped_data_(browser->GetUnownedUserDataHost(), *this) {
   SetOrientation(views::BoxLayout::Orientation::kVertical);
   SetCrossAxisAlignment(views::BoxLayout::CrossAxisAlignment::kStretch);
+  SetBackground(std::make_unique<SidebarBackdrop>(this));
   // Shared favorites and the title have their own fixed place above the
   // Space list. A large favorites grid can scroll within its own viewport.
   auto favorites = std::make_unique<views::ScrollView>();
@@ -1196,23 +1552,36 @@ bool PaintPageChrome(gfx::Canvas* canvas, const views::View*, const BrowserView*
   return false;
 }
 void ApplyPageChromePalette(const BrowserView* browser, ui::ColorProviderKey& key) {
-  // The existing app-controller initializer belongs to PWAs; leave it intact.
-  if (key.app_controller) return;
-  const auto color = PageChromeColor(browser);
-  if (!color) return;
-  // A finite set of process-lifetime palettes keeps ColorProvider keys stable.
+  if (!browser || key.app_controller ||
+      !base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser") ||
+      browser->browser()->GetType() != BrowserWindowInterface::TYPE_NORMAL ||
+      browser->browser()->GetProfile()->IsOffTheRecord() ||
+      UsesSystemContrast(key)) {
+    return;
+  }
+  constexpr int kPaletteCount =
+      static_cast<int>(ToolbarPalette::kCount) * kAccentCount * kAccentCount;
   static const base::NoDestructor<
-      std::array<std::unique_ptr<PageChromePalette>, 2 * kPageAccentHues>> palettes([] {
-    std::array<std::unique_ptr<PageChromePalette>, 2 * kPageAccentHues> result;
-    for (int i = 0; i < 2 * kPageAccentHues; ++i)
-      result[i] = std::make_unique<PageChromePalette>(i >= kPageAccentHues,
-                                                     i % kPageAccentHues);
+      std::array<std::unique_ptr<PageChromePalette>, kPaletteCount>> palettes([] {
+    std::array<std::unique_ptr<PageChromePalette>, kPaletteCount> result;
+    for (int i = 0; i < kPaletteCount; ++i) {
+      result[i] = std::make_unique<PageChromePalette>(
+          static_cast<ToolbarPalette>(i / (kAccentCount * kAccentCount)),
+          (i / kAccentCount) % kAccentCount, i % kAccentCount);
+    }
     return result;
   }());
   const auto* sidebar =
       SpaceNavigationView::Get(browser->browser()->GetUnownedUserDataHost());
-  const int mode = color_utils::IsDark(*color) ? kPageAccentHues : 0;
-  key.app_controller = (*palettes)[mode + sidebar->page_chrome_accent()].get();
+  const auto color = sidebar ? sidebar->page_chrome_color() : std::nullopt;
+  const auto toolbar = !color ? ToolbarPalette::kNative :
+      (color_utils::IsDark(*color) ? ToolbarPalette::kDarkPage : ToolbarPalette::kLightPage);
+  const int space_accent = sidebar ? sidebar->space_chrome_accent().value_or(kAtriumAccent)
+                                  : kAtriumAccent;
+  const int page_accent = color ? sidebar->page_chrome_accent() : space_accent;
+  const int index = (static_cast<int>(toolbar) * kAccentCount + page_accent) *
+                    kAccentCount + space_accent;
+  key.app_controller = (*palettes)[index].get();
 }
 std::unique_ptr<views::Background> CreatePageChromeEdgeBackground(BrowserView& browser, bool layer_based) {
   return std::make_unique<PageChromeEdgeBackground>(browser, layer_based);
@@ -1224,7 +1593,32 @@ std::unique_ptr<views::Background> CreateToolbarBackground(views::View& view, Br
   return std::make_unique<SidebarFrameBackground>(view, browser, true);
 }
 SkColor SpaceNavigationView::SidebarColor() const {
-  const auto* space = workspace_->loaded() ? workspace_->model().FindSpace(active_space_id_) : nullptr;
+  return SidebarColorFor(active_space_id_);
+}
+SkColor SpaceNavigationView::SidebarBackdropColor() const {
+  return swipe_backdrop_ ? swipe_backdrop_->base : SidebarColor();
+}
+SidebarBackdropColors SpaceNavigationView::BackdropColors() const {
+  return swipe_backdrop_ ? *swipe_backdrop_ :
+      MakeSidebarBackdrop(SidebarColor(), HasPrideBackdrop());
+}
+ui::ColorProviderKey::InitializerSupplier&
+SpaceNavigationView::GlobalSearchPalette() const {
+  // ColorProvider keys outlive individual browser windows and Spaces.
+  static const base::NoDestructor<
+      std::array<std::unique_ptr<SearchPalette>, kAccentCount>> palettes([] {
+    std::array<std::unique_ptr<SearchPalette>, kAccentCount> result;
+    for (int index = 0; index < kAccentCount; ++index) {
+      result[index] = std::make_unique<SearchPalette>(index);
+    }
+    return result;
+  }());
+  const auto* space = workspace_->model().FindSpace(active_space_id_);
+  return *(*palettes)[PageAccentIndex(SK_ColorWHITE, space ? space->color : 0,
+                                     workspace_->edition() == "pride")];
+}
+SkColor SpaceNavigationView::SidebarColorFor(const std::string& space_id) const {
+  const auto* space = workspace_->loaded() ? workspace_->model().FindSpace(space_id) : nullptr;
   if (space && space->color) return space->color;
   const bool dark = GetWidget()
       ? GetWidget()->GetColorMode() == ui::ColorProviderKey::ColorMode::kDark
@@ -1234,10 +1628,62 @@ SkColor SpaceNavigationView::SidebarColor() const {
       : (workspace_->edition() == "pride" ? SkColorSetRGB(244, 241, 248) : SkColorSetRGB(240, 239, 251));
 }
 bool SpaceNavigationView::HasPrideBackdrop() const {
-  const auto* space = workspace_->loaded() ? workspace_->model().FindSpace(active_space_id_) : nullptr;
-  return workspace_->edition() == "pride" && !(space && space->color);
+  return workspace_->edition() == "pride";
 }
 bool SpaceNavigationView::IsDark() const { return color_utils::IsDark(SidebarColor()); }
+void SpaceNavigationView::SetSwipeBackdrop(std::optional<SidebarBackdropColors> colors) {
+  if (colors == swipe_backdrop_) return;
+  const auto previous = BackdropColors();
+  swipe_backdrop_ = std::move(colors);
+  const auto current = BackdropColors();
+  if (previous == current) return;
+  const bool dark = color_utils::IsDark(current.base);
+  if (color_utils::IsDark(previous.base) != dark) UpdateSidebarInk(dark);
+  ScheduleSidebarBackdropPaint();
+}
+
+void SpaceNavigationView::ScheduleSidebarBackdropPaint() {
+  SchedulePaint();
+  if (!GetWidget()) return;
+  // A Views repaint stops at the nearest compositor layer. The vertical tab
+  // strip and macOS frame paint their own parts of the rail on separate layers.
+  const auto repaint_rail = [this](views::View* owner) {
+    const auto rail = views::View::ConvertRectToTarget(this, owner, GetLocalBounds());
+    owner->SchedulePaintInRect(
+        gfx::Rect(rail.x(), 0, rail.width(), owner->height()));
+  };
+  for (auto* ancestor = parent(); ancestor; ancestor = ancestor->parent()) {
+    if (ancestor->layer()) repaint_rail(ancestor);
+  }
+  if (auto* non_client = GetWidget()->non_client_view()) {
+    if (auto* frame = non_client->frame_view()) repaint_rail(frame);
+  }
+}
+
+namespace {
+void SetSidebarTreeDark(views::View* view, bool dark) {
+  if (auto* tab = views::AsViewClass<TabRow>(view)) {
+    tab->SetDark(dark);
+  } else if (auto* button = views::AsViewClass<SidebarButton>(view)) {
+    button->SetDark(dark);
+  } else if (auto* label = views::AsViewClass<views::Label>(view)) {
+    label->SetEnabledColor(dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53));
+  } else {
+    for (const auto& child : view->children()) SetSidebarTreeDark(child, dark);
+  }
+}
+}  // namespace
+
+void SpaceNavigationView::UpdateSidebarInk(bool dark) {
+  const std::array<views::View*, 6> trees = {
+      favorites_body_.get(), dock_.get(), space_header_.get(),
+      space_body_.get(), swipe_preview_title_.get(), swipe_preview_.get()};
+  for (auto* view : trees) {
+    if (view) SetSidebarTreeDark(view, dark);
+  }
+  UpdateFrameButtonInk(dark);
+}
+
 void SpaceNavigationView::UpdateFrameButton() {
   RefreshTaiPanelLabels(browser_);
 #if BUILDFLAG(IS_MAC)
@@ -1252,18 +1698,24 @@ void SpaceNavigationView::UpdateFrameButton() {
     auto text = LocalizedText16(browser_->GetProfile(), "显示/隐藏侧栏", "Show/hide sidebar");
     if (shortcut.key_code() != ui::VKEY_UNKNOWN) text += u" (" + shortcut.GetShortcutText() + u")";
     frame_button->SetTooltipText(text);
-    const auto& image = frame_button->GetImageModel(views::Button::STATE_NORMAL);
-    if (image && image->IsVectorIcon()) {
-      const auto icon = image->GetVectorIcon();
-      const bool dark = !GetVisible() && page_chrome_color_
-          ? color_utils::IsDark(*page_chrome_color_) : IsDark();
-      const auto colored = ui::ImageModel::FromVectorIcon(*icon.vector_icon(),
-          dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53), icon.icon_size());
-      for (auto state : {views::Button::STATE_NORMAL, views::Button::STATE_HOVERED,
-                         views::Button::STATE_PRESSED, views::Button::STATE_DISABLED})
-        frame_button->SetImageModel(state, colored);
-    }
   }
+  UpdateFrameButtonInk(!GetVisible() && page_chrome_color_
+      ? color_utils::IsDark(*page_chrome_color_)
+      : color_utils::IsDark(SidebarBackdropColor()));
+}
+
+void SpaceNavigationView::UpdateFrameButtonInk(bool dark) {
+  auto* control = GetWidget() ? GetWidget()->GetRootView()->GetViewByID(0x534254) : nullptr;
+  auto* frame_button = control ? static_cast<views::LabelButton*>(control) : nullptr;
+  if (!frame_button) return;
+  const auto& image = frame_button->GetImageModel(views::Button::STATE_NORMAL);
+  if (!image || !image->IsVectorIcon()) return;
+  const auto icon = image->GetVectorIcon();
+  const auto colored = ui::ImageModel::FromVectorIcon(*icon.vector_icon(),
+      dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53), icon.icon_size());
+  for (auto state : {views::Button::STATE_NORMAL, views::Button::STATE_HOVERED,
+                     views::Button::STATE_PRESSED, views::Button::STATE_DISABLED})
+    frame_button->SetImageModel(state, colored);
 }
 void SpaceNavigationView::SchedulePageChromeRefresh() {
   if (page_chrome_refresh_pending_ || !model_) return;
@@ -1299,16 +1751,20 @@ void SpaceNavigationView::RefreshPageChrome() {
     }
   }
   const auto* space = workspace_->model().FindSpace(active_space_id_);
-  const int accent = color ? PageAccentIndex(*color, space ? space->color : 0,
-                                             workspace_->edition() == "pride") : 0;
-  if (page_chrome_color_ == color && page_chrome_accent_ == accent) return;
+  const bool pride = workspace_->edition() == "pride";
+  const SkColor space_color = space ? space->color : 0;
+  const int space_accent = PageAccentIndex(SK_ColorWHITE, space_color, pride);
+  const int accent = color ? PageAccentIndex(*color, space_color, pride) : space_accent;
+  if (page_chrome_color_ == color && page_chrome_accent_ == accent &&
+      space_chrome_accent_ == space_accent) return;
   const bool palette_changed = !page_chrome_color_ || !color ||
       color_utils::IsDark(*page_chrome_color_) != color_utils::IsDark(*color) ||
-      page_chrome_accent_ != accent;
+      page_chrome_accent_ != accent || space_chrome_accent_ != space_accent;
   VLOG(1) << "TAi toolbar surface="
           << (!color ? "native" : color_utils::IsDark(*color) ? "dark-page" : "light-page");
   page_chrome_color_ = color;
   page_chrome_accent_ = accent;
+  space_chrome_accent_ = space_accent;
   auto* toolbar = BrowserView::GetBrowserViewForBrowser(browser_)->toolbar();
   // Native browser controls get a window-local palette; never override the
   // Widget color mode, which also controls webpage prefers-color-scheme.
@@ -1327,14 +1783,18 @@ void SpaceNavigationView::RefreshPageChrome() {
   GetWidget()->GetRootView()->SchedulePaint();
 }
 void SpaceNavigationView::OnThemeChanged() { views::BoxLayoutView::OnThemeChanged(); SchedulePageChromeRefresh(); ScheduleRefresh(); }
-void SpaceNavigationView::ShowAppearance() {
-  const auto id = active_space_id_;
+void SpaceNavigationView::ShowAppearance(const std::string& id) {
   const auto* space = workspace_->model().FindSpace(id); if (!space) return;
   appearance_widget_.reset(); appearance_delegate_.reset();
-  appearance_delegate_ = std::make_unique<SpaceAppearanceBubble>(browser_->GetProfile(), this, SpaceColorHex(space->color),
+  appearance_delegate_ = std::make_unique<SpaceAppearanceBubble>(
+      browser_->GetProfile(), id == active_space_id_ ? title_clip_.get() : dock_.get(),
+      base::UTF8ToUTF16(space->icon + "  " + space->name),
+      SpaceColorHex(space->color), SidebarColorFor(std::string()),
       base::BindRepeating([](base::WeakPtr<SpaceNavigationView> self, std::string id, std::string color) {
         if (!self || !self->workspace_->model().SetSpaceColor(id, color)) return false;
-        self->workspace_->Commit(); self->ScheduleRefresh(); return true;
+        self->workspace_->Commit();
+        self->ScheduleRefresh();
+        return true;
       }, weak_factory_.GetWeakPtr(), id));
   appearance_widget_ = views::BubbleDialogDelegate::CreateBubble(appearance_delegate_.get(),
       base::BindOnce([](base::WeakPtr<SpaceNavigationView> self, views::Widget::ClosedReason) {
@@ -1630,6 +2090,46 @@ void SpaceNavigationView::OnBoundsChanged(const gfx::Rect& previous_bounds) {
       base::BindOnce(&SpaceNavigationView::ScheduleRefresh, weak_factory_.GetWeakPtr()));
 }
 
+SpaceNavigationView::RenderState SpaceNavigationView::CaptureRenderState() const {
+  const auto* selected = model_->GetActiveTab();
+  RenderState state{
+      .space = active_space_id_,
+      .revision = workspace_->revision(),
+      .editor = edit_id_,
+      .sidebar_color = SidebarColor(),
+      .toolbar_dark = !GetVisible() && page_chrome_color_
+                          ? std::optional(color_utils::IsDark(*page_chrome_color_))
+                          : std::nullopt,
+      .dock_layout = GetSpaceDockLayout(width(), workspace_->model().spaces().size(),
+                                        collapsed_),
+      .favicon_generation = favicon_generation_,
+      .collapsed = collapsed_,
+      .clear_pending = ClearPending(active_space_id_),
+      .recoverable = std::nullopt,
+      .tabs = {},
+  };
+  if (const auto batch = clear_batches_.find(active_space_id_);
+      batch != clear_batches_.end()) {
+    state.cleared = batch->second.closed;
+    state.kept = batch->second.cancelled;
+    state.recoverable = RestorableClear(active_space_id_).size();
+  }
+  for (const auto handle : VisibleTabs(true)) {
+    const auto& binding = bindings_.at(handle.raw_value());
+    if (binding.placeholder) continue;
+    const auto* tab = handle.Get();
+    auto* contents = tab->GetContents();
+    auto* favicon = favicon::ContentFaviconDriver::FromWebContents(contents);
+    state.tabs.push_back({
+        handle.raw_value(), binding.item_id,
+        binding.item_id.empty() ? contents->GetTitle() : std::u16string(),
+        favicon && favicon->FaviconIsValid() ? favicon->GetFavicon() : gfx::Image(),
+        tab == selected,
+    });
+  }
+  return state;
+}
+
 void SpaceNavigationView::ScheduleRefresh() {
   if (refresh_pending_ || !model_) return;
   refresh_pending_ = true;
@@ -1639,7 +2139,8 @@ void SpaceNavigationView::ScheduleRefresh() {
 void SpaceNavigationView::Refresh() {
   refresh_pending_ = false;
   if (!model_ || !workspace_->loaded()) return;
-  if ((IsSpaceTransitionRunning() || swipe_preview_active_) &&
+  if ((IsSpaceTransitionRunning() || swipe_preview_active_ ||
+       settling_swipe_direction_) &&
       !transition_direction_) {
     refresh_after_transition_ = true;
     return;
@@ -1653,7 +2154,14 @@ void SpaceNavigationView::Refresh() {
   refresh_after_transition_ = false;
   SyncTabs();
   RefreshPageChrome();
-  Render();
+  auto state = CaptureRenderState();
+  // Selecting a tab can queue several refreshes through native theme and
+  // navigation notifications. Reuse the rows if their inputs are unchanged.
+  if (!transition_direction_ && rendered_state_ && state == *rendered_state_) {
+    TRACE_EVENT_INSTANT("browser", "TAi.ReuseSidebarRows");
+    return;
+  }
+  Render(std::move(state));
 }
 void SpaceNavigationView::SetBinding(tabs::TabInterface* tab, TabOrganization value) {
   if (!tab || tab->GetContents()->GetBrowserContext() != browser_->GetProfile()) return;
@@ -1771,6 +2279,7 @@ void SpaceNavigationView::FinishSpaceTransition() {
   transition_direction_ = 0;
   transition_from_swipe_ = false;
   swipe_preview_active_ = false;
+  settling_swipe_direction_ = 0;
   if (space_body_) {
     space_body_->layer()->GetAnimator()->StopAnimating();
     space_body_->layer()->SetTransform(gfx::Transform());
@@ -1785,25 +2294,51 @@ void SpaceNavigationView::FinishSpaceTransition() {
 }
 void SpaceNavigationView::OnSpaceTransitionFinished(unsigned generation) {
   if (generation != transition_generation_) return;
+  swipe_backdrop_animation_.reset();
   outgoing_space_layer_.reset();
   outgoing_title_layer_.reset();
+  if (const int direction = std::exchange(settling_swipe_direction_, 0)) {
+    const std::string target = swipe_preview_space_id_;
+    // A new swipe can finish the handoff before the compositor callback.
+    // Stop both animators before Refresh so it can install the live rows now.
+    ++transition_generation_;
+    space_body_->layer()->GetAnimator()->StopAnimating();
+    space_header_->layer()->GetAnimator()->StopAnimating();
+    // The translated preview stays visible until the live rows take over.
+    base::AutoReset<int> gesture(&gesture_direction_override_, direction);
+    SelectSpace(target, /*animate=*/false);
+    Refresh();
+    if (rendered_space_id_ != target) {
+      space_body_->layer()->SetTransform(gfx::Transform());
+      space_body_->layer()->SetOpacity(1.f);
+      space_header_->layer()->SetTransform(gfx::Transform());
+      space_header_->layer()->SetOpacity(1.f);
+    }
+  }
   RemoveSwipePreview();
+  SetSwipeBackdrop(std::nullopt);
+  if (space_body_) space_body_->SetCanProcessEventsWithinSubtree(true);
+  if (space_header_) space_header_->SetCanProcessEventsWithinSubtree(true);
   if (std::exchange(refresh_after_transition_, false)) ScheduleRefresh();
 }
 void SpaceNavigationView::AnimateSpaceLayers(base::TimeDelta duration,
                                              float outgoing_offset,
-                                             std::optional<float> preview_offset) {
+                                             std::optional<float> preview_offset,
+                                             bool commit_swipe) {
   const auto finished = base::BindPostTaskToCurrentDefault(base::BindRepeating(
       &SpaceNavigationView::OnSpaceTransitionFinished, weak_factory_.GetWeakPtr(),
       ++transition_generation_));
+  const gfx::Transform body_target =
+      gfx::Transform::MakeTranslation(commit_swipe ? outgoing_offset : 0.f, 0);
+  const float body_opacity = commit_swipe ? 0.f : 1.f;
   views::AnimationBuilder animation;
   auto& block = animation.OnEnded(finished).OnAborted(finished).Once()
                     .SetDuration(duration)
-                    .SetTransform(space_body_, gfx::Transform(), gfx::Tween::EASE_OUT)
-                    .SetOpacity(space_body_, 1.f, gfx::Tween::EASE_OUT);
+                    .SetTransform(space_body_, body_target, gfx::Tween::EASE_OUT)
+                    .SetOpacity(space_body_, body_opacity, gfx::Tween::EASE_OUT);
   if (space_header_ && !space_header_->layer()->transform().IsIdentity()) {
-    block.SetTransform(space_header_, gfx::Transform(), gfx::Tween::EASE_OUT)
-        .SetOpacity(space_header_, 1.f, gfx::Tween::EASE_OUT);
+    block.SetTransform(space_header_, body_target, gfx::Tween::EASE_OUT)
+        .SetOpacity(space_header_, body_opacity, gfx::Tween::EASE_OUT);
   }
   for (auto* outgoing : {outgoing_space_layer_.get(), outgoing_title_layer_.get()}) {
     if (!outgoing) continue;
@@ -1853,10 +2388,13 @@ void SpaceNavigationView::PlaySpaceTransition(std::optional<float> swipe_entranc
 void SpaceNavigationView::PreviewSpaceSwipe(float offset) {
   if (!CanAnimateSpace() || space_body_->width() <= 0) return;
   if (!swipe_preview_active_) {
+    if (settling_swipe_direction_)
+      OnSpaceTransitionFinished(transition_generation_);
     FinishSpaceTransition();
     swipe_preview_active_ = true;
   }
-  const int width = space_body_->width();
+  const int width = body_->parent()->width();
+  if (width <= 0) return;
   const bool has_neighbour = workspace_->model().spaces().size() > 1;
   const float shift = has_neighbour
       ? std::clamp(offset, -static_cast<float>(width), static_cast<float>(width))
@@ -1873,6 +2411,7 @@ void SpaceNavigationView::PreviewSpaceSwipe(float offset) {
   }
   if (!has_neighbour || shift == 0.f) {
     RemoveSwipePreview();
+    SetSwipeBackdrop(std::nullopt);
     return;
   }
   const auto adjacent =
@@ -1881,61 +2420,100 @@ void SpaceNavigationView::PreviewSpaceSwipe(float offset) {
     RemoveSwipePreview();
     auto* viewport = body_->parent();
     const auto visible = space_scroll_->GetVisibleRect();
-    if (adjacent.empty() || visible.IsEmpty()) return;
+    if (adjacent.empty() || visible.IsEmpty()) {
+      SetSwipeBackdrop(std::nullopt);
+      return;
+    }
     const float saved_offset = SpaceScrollOffset(adjacent);
     // Build enough of the destination list to reach its remembered viewport.
     // The estimate uses less than the minimum height of a saved or tab row.
     const int row_budget = static_cast<int>(saved_offset / 30) +
                            visible.height() / 30 + 3;
     auto rows = BuildSpaceBody(adjacent, false, row_budget);
-    const int rows_height = rows->GetHeightForWidth(width);
+    const int rows_width = space_body_->width();
+    const int rows_height = rows->GetHeightForWidth(rows_width);
     const auto insets = body_->GetInsideBorderInsets();
     const int max_offset =
         std::max(0, rows_height + insets.height() - visible.height());
     const float y = insets.top() -
                     std::min(saved_offset, static_cast<float>(max_offset));
     const int layout_y = std::lround(y);
-    rows->SetBounds(0, layout_y, width, rows_height);
+    rows->SetBounds(space_body_->x() - visible.x(), layout_y, rows_width,
+                    rows_height);
     rows->layer()->SetTransform(gfx::Transform::MakeTranslation(0, y - layout_y));
-    auto preview = std::make_unique<views::View>();
-    preview->SetCanProcessEventsWithinSubtree(false);
-    preview->GetViewAccessibility().SetIsLeaf(true);
-    preview->GetViewAccessibility().SetIsIgnored(true);
-    preview->SetPaintToLayer();
-    preview->layer()->SetFillsBoundsOpaquely(false);
-    preview->layer()->SetMasksToBounds(true);
-    preview->SetBounds(space_body_->x() - visible.x(), 0, width, visible.height());
+    auto make_preview = [](const gfx::Rect& bounds) {
+      auto preview = std::make_unique<views::View>();
+      preview->SetCanProcessEventsWithinSubtree(false);
+      preview->GetViewAccessibility().SetIsLeaf(true);
+      preview->GetViewAccessibility().SetIsIgnored(true);
+      preview->SetPaintToLayer();
+      // Move the rows over the same backdrop as the rest of the rail. An
+      // opaque preview paints a moving seam across both lists and titles.
+      preview->layer()->SetFillsBoundsOpaquely(false);
+      preview->layer()->SetMasksToBounds(true);
+      preview->SetBoundsRect(bounds);
+      return preview;
+    };
+    auto preview = make_preview(gfx::Rect(width, visible.height()));
     preview->AddChildView(std::move(rows));
     swipe_preview_ = viewport->AddChildView(std::move(preview));
     swipe_preview_->DeprecatedLayoutImmediately();
     auto title = BuildSpaceHeader(adjacent, false);
-    title->SetProperty(views::kViewIgnoredByLayoutKey, true);
-    title->SetCanProcessEventsWithinSubtree(false);
-    title->GetViewAccessibility().SetIsLeaf(true);
-    title->GetViewAccessibility().SetIsIgnored(true);
     title->SetBoundsRect(space_header_->bounds());
-    swipe_preview_title_ = title_clip_->AddChildView(std::move(title));
+    auto title_preview = make_preview(title_clip_->GetLocalBounds());
+    title_preview->SetProperty(views::kViewIgnoredByLayoutKey, true);
+    title_preview->AddChildView(std::move(title));
+    swipe_preview_title_ = title_clip_->AddChildView(std::move(title_preview));
     swipe_preview_title_->DeprecatedLayoutImmediately();
     swipe_preview_space_id_ = adjacent;
+    const bool dark = color_utils::IsDark(SidebarBackdropColor());
+    if (dark != color_utils::IsDark(SidebarColorFor(adjacent))) {
+      SetSidebarTreeDark(swipe_preview_, dark);
+      SetSidebarTreeDark(swipe_preview_title_, dark);
+    }
   }
   gfx::Transform entrance;
   entrance.Translate(shift + std::copysign(width, -shift), 0);
   swipe_preview_->layer()->SetTransform(entrance);
   swipe_preview_title_->layer()->SetTransform(entrance);
+  const bool pride = HasPrideBackdrop();
+  SetSwipeBackdrop(BlendSidebarBackdrops(
+      MakeSidebarBackdrop(SidebarColor(), pride),
+      MakeSidebarBackdrop(SidebarColorFor(adjacent), pride), std::abs(shift) / width));
 }
 void SpaceNavigationView::CompleteSpaceSwipe(float offset, bool flick) {
   const bool had_preview = std::exchange(swipe_preview_active_, false);
-  const int width = space_body_ ? space_body_->width() : 0;
+  const int width = space_body_ ? body_->parent()->width() : 0;
   const float threshold = width > 0 ? std::min(kSwipeCommitDistance, width * 0.3f)
                                     : kSwipeCommitDistance;
   const float distance = std::abs(offset);
-  if (workspace_->model().spaces().size() > 1 &&
-      (distance >= threshold || (flick && distance >= kSwipeFlickDistance))) {
+  const bool commit = workspace_->model().spaces().size() > 1 &&
+      (distance >= threshold || (flick && distance >= kSwipeFlickDistance));
+  TRACE_EVENT("browser", "TAi.CompleteSpaceSwipe", "commit", commit,
+              "offset", offset, "flick", flick);
+  if (commit) {
+    const int direction = (offset < 0) != base::i18n::IsRTL() ? 1 : -1;
+    if (had_preview && swipe_preview_ && CanAnimateSpace()) {
+      settling_swipe_direction_ = direction;
+      space_body_->SetCanProcessEventsWithinSubtree(false);
+      space_header_->SetCanProcessEventsWithinSubtree(false);
+      swipe_backdrop_animation_ = std::make_unique<SwipeBackdropAnimation>(
+          *this, kSwipeEntryDuration, BackdropColors(),
+          MakeSidebarBackdrop(SidebarColorFor(swipe_preview_space_id_), HasPrideBackdrop()));
+      AnimateSpaceLayers(kSwipeEntryDuration, std::copysign(width, offset),
+                         0.f, /*commit_swipe=*/true);
+      return;
+    }
     transition_from_swipe_ = true;
-    SwitchRelativeSpace((offset < 0) != base::i18n::IsRTL() ? 1 : -1);
+    SwitchRelativeSpace(direction);
     return;
   }
   if (had_preview && CanAnimateSpace()) {
+    if (swipe_backdrop_ && *swipe_backdrop_ != MakeSidebarBackdrop(SidebarColor(), HasPrideBackdrop())) {
+      swipe_backdrop_animation_ = std::make_unique<SwipeBackdropAnimation>(
+          *this, kSwipeReturnDuration, BackdropColors(),
+          MakeSidebarBackdrop(SidebarColor(), HasPrideBackdrop()));
+    }
     AnimateSpaceLayers(kSwipeReturnDuration, 0,
         swipe_preview_ ? std::optional<float>(std::copysign(width, -offset))
                        : std::nullopt);
@@ -1952,7 +2530,39 @@ void SpaceNavigationView::RemoveSwipePreview() {
   swipe_preview_title_ = nullptr;
   if (title) title->parent()->RemoveChildViewT(title);
 }
+tabs::TabInterface* SpaceNavigationView::ReusableHomePlaceholder(
+    tabs::TabInterface* preferred) {
+  const GURL home = ProductNewTabURL(browser_);
+  if (!home.is_valid()) return nullptr;
+
+  const auto can_reuse = [&](tabs::TabInterface* tab) {
+    if (!tab) return false;
+    const auto binding = bindings_.find(tab->GetHandle().raw_value());
+    if (binding == bindings_.end() || !binding->second.placeholder ||
+        !binding->second.item_id.empty()) {
+      return false;
+    }
+    auto* contents = tab->GetContents();
+    auto& controller = contents->GetController();
+    return contents->GetLastCommittedURL() == home && !contents->IsCrashed() &&
+           !controller.NeedsReload() && !controller.GetPendingEntry() &&
+           controller.GetEntryCount() == 1;
+  };
+
+  // Keep the visible Home document in place when both Spaces are empty.
+  if (auto* active = model_->GetActiveTab(); can_reuse(active)) return active;
+  if (can_reuse(preferred)) return preferred;
+  for (int index = 0; index < model_->count(); ++index) {
+    auto* tab = model_->GetTabAtIndex(index);
+    if (can_reuse(tab)) return tab;
+  }
+  return nullptr;
+}
 void SpaceNavigationView::ActivateSpace(std::string id) {
+  SelectSpace(std::move(id), /*animate=*/true);
+}
+void SpaceNavigationView::SelectSpace(std::string id, bool animate) {
+  if (settling_swipe_direction_) FinishSpaceTransition();
   if (editor_ && editor_->HasFocus()) CommitRename();
   if (!workspace_->loaded() || !model_) return;
   SyncTabs();
@@ -1967,9 +2577,9 @@ void SpaceNavigationView::ActivateSpace(std::string id) {
     VLOG(1) << "TAi Space switch gesture=" << (gesture_direction_override_ != 0);
     const auto old_index = std::distance(ws.spaces().begin(), std::ranges::find(ws.spaces(), active_space_id_, &WorkspaceSpace::id));
     const auto new_index = std::distance(ws.spaces().begin(), std::ranges::find(ws.spaces(), id, &WorkspaceSpace::id));
-    transition_direction_ = gesture_direction_override_
-                                ? gesture_direction_override_
-                                : (new_index > old_index ? 1 : -1);
+    transition_direction_ = !animate ? 0
+        : gesture_direction_override_ ? gesture_direction_override_
+                                      : (new_index > old_index ? 1 : -1);
     if (base::i18n::IsRTL()) transition_direction_ = -transition_direction_;
   }
   if (!ws.ActivateSpace(id)) return;
@@ -1981,12 +2591,21 @@ void SpaceNavigationView::ActivateSpace(std::string id) {
       model_->GetIndexOfTab(last->second.Get()) != TabStripModel::kNoTab &&
       bindings_.contains(last->second.raw_value()) &&
       bindings_.at(last->second.raw_value()).space_id == id) target = last->second;
-  if (!target) {
+  if (!target || bindings_.at(target->raw_value()).placeholder) {
     auto tabs = VisibleTabs(false);
     if (!tabs.empty()) target = tabs.front();
+    if (!target || bindings_.at(target->raw_value()).placeholder) {
+      if (auto* home = ReusableHomePlaceholder(target ? target->Get() : nullptr)) {
+        SetBinding(home, {id, {}, true});
+        target = home->GetHandle();
+      }
+    }
   }
-  if (target) model_->ActivateTab(target->Get());
-  else NewTab(true);
+  if (target) {
+    if (model_->GetActiveTab() != target->Get()) model_->ActivateTab(target->Get());
+  } else {
+    NewTab(true);
+  }
   workspace_->Commit();
   ScheduleRefresh();
 }
@@ -2148,6 +2767,67 @@ GURL ProductNewTabURL(BrowserWindowInterface* browser) {
 #endif
   return GURL("chrome://tai/home.html");
 }
+bool SpaceNavigationView::CanRemoveCurrentSpace() const {
+  return model_ && workspace_->loaded() && !workspace_->load_error() &&
+         SpaceRemovalTarget(workspace_->model(), active_space_id_);
+}
+
+void SpaceNavigationView::ConfirmRemoveSpace(const std::string& id) {
+  if (!model_ || !workspace_->loaded() || workspace_->load_error()) return;
+  const auto& workspace = workspace_->model();
+  const auto* source = workspace.FindSpace(id);
+  const auto* target = SpaceRemovalTarget(workspace, id);
+  auto* contents = model_->GetActiveWebContents();
+  if (!source || !target || !contents) return;
+
+  auto* profile = browser_->GetProfile();
+  const auto title = LocalizedText16(profile, "删除 Space ", "Delete Space ") +
+                     base::UTF8ToUTF16(source->name) + u"?";
+  const bool chinese = LocalizedText(profile, "zh", "en") == "zh";
+  const auto destination = base::UTF8ToUTF16(target->name);
+  const auto description = chinese
+      ? u"已保存的网页、文件夹和打开的标签页将移到「" + destination + u"」。"
+      : u"Saved pages, folders, and open tabs will move to “" + destination + u"”.";
+  auto dialog = ui::DialogModel::Builder()
+      .SetTitle(title)
+      .AddParagraph(ui::DialogModelLabel(description))
+      .AddOkButton(base::BindOnce(&SpaceNavigationView::RemoveSpaceAndMoveContents,
+                                  weak_factory_.GetWeakPtr(), id, target->id),
+                   ui::DialogModel::Button::Params().SetLabel(
+                       LocalizedText16(profile, "删除 Space", "Delete Space")))
+      .AddCancelButton(base::DoNothing(), ui::DialogModel::Button::Params().SetLabel(
+                       LocalizedText16(profile, "取消", "Cancel")))
+      .OverrideDefaultButton(ui::mojom::DialogButton::kCancel)
+      .Build();
+  chrome::ShowTabModal(std::move(dialog), contents);
+}
+
+void SpaceNavigationView::RemoveSpaceAndMoveContents(std::string id,
+                                                     std::string destination) {
+  if (!model_ || !workspace_->loaded() || workspace_->load_error() ||
+      !workspace_->model().RemoveSpace(id, destination)) return;
+
+  // Move existing tab bindings before notifying other views of the new model.
+  for (auto* window : GetAllBrowserWindowInterfaces()) {
+    if (window->GetProfile() != browser_->GetProfile()) continue;
+    auto* view = From(window);
+    if (!view || !view->model_) continue;
+    for (int i = 0; i < view->model_->count(); ++i) {
+      auto* tab = view->model_->GetTabAtIndex(i);
+      const auto found = view->bindings_.find(tab->GetHandle().raw_value());
+      auto binding = found != view->bindings_.end()
+          ? std::optional(found->second) : ReadOrganization(tab->GetContents());
+      if (!binding || binding->space_id != id) continue;
+      binding->space_id = destination;
+      view->SetBinding(tab, std::move(*binding));
+    }
+    if (view->active_space_id_ == id) view->active_space_id_ = destination;
+    view->space_scroll_offsets_.erase(id);
+    view->last_active_.erase(id);
+  }
+  workspace_->Commit();
+}
+
 void SpaceNavigationView::CreateSpace() {
   if (!workspace_->loaded()) return;
   const auto id = NewId();
@@ -2172,6 +2852,11 @@ bool SpaceNavigationView::PerformShortcut(std::string_view action) {
   else if (action == "next_space") SwitchRelativeSpace(1);
   else if (action == "previous_space") SwitchRelativeSpace(-1);
   else if (action == "new_space") CreateSpace();
+  else if (action == "all_spaces") ShowSpaceChooser();
+  else if (action == "rename_space") BeginRename(active_space_id_, true);
+  else if (action == "color_space") ShowAppearance(active_space_id_);
+  else if (action == "icon_space") OpenSpaceSettings(active_space_id_);
+  else if (action == "remove_space") ConfirmRemoveSpace(active_space_id_);
   else if (action == "new_folder") NewFolder({});
   else if (action == "pin_tab") SaveCurrent({}, false);
   else if (action == "favorite_tab") SaveCurrent({}, true);
@@ -2514,6 +3199,7 @@ ui::ImageModel SpaceNavigationView::SavedIcon(
              const favicon_base::FaviconImageResult& result) {
             if (self && !result.image.IsEmpty()) {
               self->favicon_cache_.insert_or_assign(url, result.image);
+              ++self->favicon_generation_;
               self->ScheduleRefresh();
             }
           }, weak_factory_.GetWeakPtr(), item.url), &favicon_tasks_);
@@ -2524,10 +3210,9 @@ ui::ImageModel SpaceNavigationView::SavedIcon(
 
 void SpaceNavigationView::RenderTab(views::BoxLayoutView* parent,
                                     tabs::TabHandle handle, int depth,
-                                    bool interactive) {
+                                    bool interactive, bool dark) {
   auto* tab = handle.Get(); if (!tab) return;
   const bool active = model_->GetActiveTab() == tab;
-  const bool dark = IsDark();
   auto* profile = browser_->GetProfile();
   auto title = tab->GetContents()->GetTitle();
   if (title.empty()) title = LocalizedText16(profile, "新标签页", "New Tab");
@@ -2586,7 +3271,7 @@ void SpaceNavigationView::RenderSaved(views::BoxLayoutView* parent,
       live_items.try_emplace(binding->second.item_id, handle);
   }
 
-  const bool dark = IsDark();
+  const bool dark = color_utils::IsDark(SidebarColorFor(space_id));
   const SkColor icon_color = dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53);
   const auto render = [&](auto&& self, views::BoxLayoutView* rows_parent,
                           std::string_view parent_id,
@@ -2599,34 +3284,39 @@ void SpaceNavigationView::RenderSaved(views::BoxLayoutView* parent,
       --row_budget;
       const auto live = live_items.find(item->id);
       if (live != live_items.end() && item->kind == SavedKind::kPage) {
-        RenderTab(rows_parent, live->second, item_depth, interactive);
+        RenderTab(rows_parent, live->second, item_depth, interactive, dark);
         continue;
       }
+      const bool folder = item->kind == SavedKind::kFolder;
+      const auto title = base::UTF8ToUTF16(item->title);
       auto* row = Row(rows_parent);
       row->SetInsideBorderInsets(gfx::Insets::TLBR(0, item_depth * 12, 0, 0));
       auto* button = row->AddChildView(std::make_unique<SidebarButton>(
           base::BindRepeating(&SpaceNavigationView::OpenItem,
                               base::Unretained(this), item->id),
-          collapsed_ ? std::u16string() : base::UTF8ToUTF16(item->title),
-          false, dark));
+          collapsed_ ? std::u16string() : title, false, dark,
+          /*radius=*/8, /*paint_background=*/true, /*emphasized=*/folder));
       row->SetFlexForView(button, 1, true);
-      button->SetTooltipText(base::UTF8ToUTF16(item->title));
+      button->SetRowTooltip(title);
       button->SetImageModel(views::Button::STATE_NORMAL,
-          item->kind == SavedKind::kFolder
+          folder
               ? ui::ImageModel::FromVectorIcon(
                     vector_icons::kFolderOpenIcon,
                     icon_color, 20)
               : SavedIcon(*item, 18, icon_color));
-      if (item->kind == SavedKind::kFolder) {
-        button->label()->SetFontList(button->label()->font_list()
-            .DeriveWithWeight(gfx::Font::Weight::SEMIBOLD));
-      }
       if (interactive) {
+        if (folder) {
+          button->SetFocusBehavior(views::View::FocusBehavior::ALWAYS);
+          if (item->collapsed)
+            button->GetViewAccessibility().SetIsCollapsed();
+          else
+            button->GetViewAccessibility().SetIsExpanded();
+        }
         RegisterRow(button, item->id, Area::kSaved);
         button->set_context_menu_controller(this);
       }
-      if (item->kind != SavedKind::kFolder || collapsed_ ||
-          item_depth >= 32 || !children.contains(item->id)) continue;
+      if (!folder || collapsed_ || item_depth >= 32 ||
+          !children.contains(item->id)) continue;
       if (interactive) {
         auto reveal = std::make_unique<FolderRevealView>(
             item_depth + 1, !item->collapsed);
@@ -2647,7 +3337,7 @@ void SpaceNavigationView::FinishFolderReveal(unsigned generation) {
 }
 std::unique_ptr<views::BoxLayoutView> SpaceNavigationView::BuildSpaceHeader(
     const std::string& space_id, bool interactive) {
-  const bool dark = IsDark();
+  const bool dark = color_utils::IsDark(SidebarColorFor(space_id));
   auto header = std::make_unique<views::BoxLayoutView>();
   header->SetBetweenChildSpacing(2);
   header->SetCrossAxisAlignment(views::BoxLayout::CrossAxisAlignment::kCenter);
@@ -2668,6 +3358,7 @@ std::unique_ptr<views::BoxLayoutView> SpaceNavigationView::BuildSpaceHeader(
     auto* menu = header->AddChildView(IconButton(
         base::BindRepeating(&SpaceNavigationView::ShowSpaceMenu, base::Unretained(this)), kMoreVertIcon, dark, 18));
     menu->SetTooltipText(LocalizedText16(browser_->GetProfile(), "Space 设置", "Space settings")); menu->SetPreferredSize(gfx::Size(28, 28));
+    if (interactive) menu->set_context_menu_controller(this);
   }
   return header;
 }
@@ -2677,7 +3368,7 @@ std::unique_ptr<views::BoxLayoutView> SpaceNavigationView::BuildSpaceBody(
   // and invalidate the live sidebar and browser hierarchy.
   auto space_body = std::make_unique<views::BoxLayoutView>();
   auto& ws = workspace_->model();
-  const bool dark = IsDark();
+  const bool dark = color_utils::IsDark(SidebarColorFor(space_id));
   space_body->SetOrientation(views::BoxLayout::Orientation::kVertical);
   space_body->SetCrossAxisAlignment(views::BoxLayout::CrossAxisAlignment::kStretch);
   space_body->SetBetweenChildSpacing(3);
@@ -2728,7 +3419,7 @@ std::unique_ptr<views::BoxLayoutView> SpaceNavigationView::BuildSpaceBody(
       // LCD subpixel text requires an opaque ancestor and DCHECKs otherwise.
       label->SetSubpixelRenderingEnabled(false);
       label->SetAutoColorReadabilityEnabled(false);
-      label->SetEnabledColor(IsDark() ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53));
+      label->SetEnabledColor(dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53));
       label->SetHorizontalAlignment(gfx::ALIGN_LEFT);
       label->SetTooltipText(browser_->GetProfile()->IsOffTheRecord() ? LocalizedText16(browser_->GetProfile(), "无痕窗口关闭后无法恢复", "Private tabs cannot be restored after closing")
           : LocalizedText16(browser_->GetProfile(), "恢复入口只属于本窗口、此 Space 最近清理的一批；重启后可使用 Chromium 的最近关闭记录", "Restore applies to the last batch cleared in this window and Space. After restart, use Chromium’s recently closed history."));
@@ -2754,7 +3445,7 @@ std::unique_ptr<views::BoxLayoutView> SpaceNavigationView::BuildSpaceBody(
     if (row_budget == 0) break;
     const auto& binding = bindings_.at(handle.raw_value());
     if (binding.item_id.empty() && !binding.placeholder) {
-      RenderTab(space_body.get(), handle, 0, interactive);
+      RenderTab(space_body.get(), handle, 0, interactive, dark);
       --row_budget;
     }
   }
@@ -2788,7 +3479,11 @@ void SpaceNavigationView::RestoreSpaceScrollAfterLayout(views::ScrollView* scrol
     scroll->ScrollToOffset(gfx::PointF(0, offset));
 }
 void SpaceNavigationView::Render() {
-  if (!workspace_->loaded() || !model_) return;
+  if (workspace_->loaded() && model_) Render(CaptureRenderState());
+}
+
+void SpaceNavigationView::Render(RenderState state) {
+  rendered_state_ = std::make_unique<RenderState>(std::move(state));
   TRACE_EVENT("browser", "TAi.RenderSidebar");
   const auto visible_offset = space_scroll_->CurrentOffset();
   const bool new_space = rendered_space_id_ != active_space_id_;
@@ -2832,6 +3527,8 @@ void SpaceNavigationView::Render() {
     }
   } else if (IsSpaceTransitionRunning() || swipe_preview_active_) {
     FinishSpaceTransition();
+  } else if (new_space) {
+    RemoveSwipePreview();
   }
   ClearDropFeedback(); drop_zones_.clear();
   row_items_.clear(); editor_ = nullptr;
@@ -2856,8 +3553,7 @@ void SpaceNavigationView::Render() {
   auto& ws = workspace_->model();
   const bool dark = IsDark();
   const SkColor icon_color = dark ? SK_ColorWHITE : SkColorSetRGB(17, 23, 53);
-  SetBackground(std::make_unique<SidebarBackdrop>(this));
-  if (GetWidget()) GetWidget()->GetRootView()->SchedulePaint();
+  ScheduleSidebarBackdropPaint();
   UpdateFrameButton();
   if (workspace_->load_error()) {
     auto* error = body_->AddChildView(std::make_unique<views::Label>(LocalizedText16(browser_->GetProfile(), "收藏数据未能读取，本次更改暂不保存", "Saved pages could not be read. Changes will not be saved.")));
@@ -2930,6 +3626,7 @@ void SpaceNavigationView::Render() {
         : base::BindRepeating(&SpaceNavigationView::ActivateSpace, weak_factory_.GetWeakPtr(), entry.id);
     auto* dot = dock_->AddChildView(std::make_unique<SpaceDockButton>(
         std::move(action), base::UTF8ToUTF16(entry.icon), selected, compact && !selected, dark));
+    dot->set_context_menu_controller(this);
     dot->SetTooltipText(base::UTF8ToUTF16(entry.name));
     dot->GetViewAccessibility().SetName(base::UTF8ToUTF16(entry.name));
     dot->GetViewAccessibility().SetIsSelected(selected);
@@ -2957,9 +3654,12 @@ void SpaceNavigationView::Render() {
   }
 }
 void SpaceNavigationView::OpenSettings() {
+  OpenSpaceSettings(active_space_id_);
+}
+void SpaceNavigationView::OpenSpaceSettings(const std::string& id) {
   if (!browser_ || browser_->GetProfile()->IsOffTheRecord()) return;
   NavigateParams params(browser_, GURL("chrome://tai/?space=" +
-      base::EscapeQueryParamValue(active_space_id_, true)), ui::PAGE_TRANSITION_AUTO_BOOKMARK);
+      base::EscapeQueryParamValue(id, true)), ui::PAGE_TRANSITION_AUTO_BOOKMARK);
   params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
   Navigate(&params);
 }
@@ -2997,15 +3697,36 @@ void SpaceNavigationView::ShowSpaceChooser() {
 void SpaceNavigationView::ShowContextMenuForViewImpl(
     views::View* source, const gfx::Point& point, ui::mojom::MenuSourceType type) {
   if (!workspace_->loaded() || !model_ || (menu_runner_ && menu_runner_->IsRunning())) return;
-  menu_item_ = row_items_.contains(source) ? row_items_[source] : std::string();
+  const auto row = row_items_.find(source);
+  const auto dot = std::ranges::find_if(drop_zones_, [source](const auto& zone) {
+    return zone.view == source && zone.area == Area::kSpace;
+  });
+  PrepareContextMenu(row == row_items_.end() ? std::string() : row->second,
+                     dot == drop_zones_.end() ? active_space_id_ : dot->space);
+  if (!menu_model_->GetItemCount()) return;
+  menu_runner_ = std::make_unique<views::MenuRunner>(menu_model_.get(), views::MenuRunner::CONTEXT_MENU);
+  menu_runner_->RunMenuAt(GetWidget(), nullptr, gfx::Rect(point, gfx::Size()),
+                           views::MenuAnchorPosition::kTopLeft, type);
+}
+
+void SpaceNavigationView::PrepareContextMenu(std::string key,
+                                             std::string space_id) {
   menu_runner_.reset();
-  menu_model_ = std::make_unique<ui::SimpleMenuModel>(this);
+  menu_model_.reset();
   folder_move_menu_.reset();
   folder_menu_destinations_.clear();
-  auto* item = workspace_->model().FindItem(menu_item_);
+  menu_item_ = std::move(key);
+  menu_space_ = space_id.empty() ? active_space_id_ : std::move(space_id);
+  menu_model_ = std::make_unique<ui::SimpleMenuModel>(this);
+  const auto* item = workspace_->model().FindItem(menu_item_);
   if (item && item->kind == SavedKind::kFolder) {
     BuildFolderMenu(*item);
-  } else {
+    return;
+  }
+  const auto label = [this](std::string_view zh, std::string_view en) {
+    return LocalizedText16(browser_->GetProfile(), zh, en);
+  };
+  if (!menu_item_.empty()) {
     menu_model_->AddItem(kRename, item ? LocalizedText16(browser_->GetProfile(), "重命名", "Rename") : LocalizedText16(browser_->GetProfile(), "重命名 Space", "Rename Space"));
     menu_model_->AddItem(kFolder, LocalizedText16(browser_->GetProfile(), "新建文件夹", "New folder"));
     menu_model_->AddItem(kSave, LocalizedText16(browser_->GetProfile(), "收藏当前页面", "Pin current page"));
@@ -3025,21 +3746,25 @@ void SpaceNavigationView::ShowContextMenuForViewImpl(
         }
       }
     }
-    menu_model_->AddItem(kAppearance, LocalizedText16(browser_->GetProfile(), "更改 Space 颜色", "Change Space color"));
-    menu_model_->AddItem(kSpaceIcon, LocalizedText16(browser_->GetProfile(), "更改 Space 图标…", "Change Space icon…"));
-    if (item || menu_item_.starts_with("@tab:")) menu_model_->AddItem(kNewWindow, LocalizedText16(browser_->GetProfile(), "移到新窗口", "Move to new window"));
-    menu_model_->AddItem(kNewSpace, LocalizedText16(browser_->GetProfile(), "新建 Space", "New Space"));
-    menu_model_->AddItem(kSettings, LocalizedText16(browser_->GetProfile(), "TAi 设置", "TAi settings"));
-    menu_model_->AddSeparator(ui::NORMAL_SEPARATOR);
-    int space_index = 0;
-    for (const auto& space : workspace_->model().spaces()) {
-      menu_model_->AddItem(kSwitchSpaceBase + space_index++, LocalizedText16(browser_->GetProfile(), "切换到 ", "Switch to ") + base::UTF8ToUTF16(space.icon + " " + space.name));
-    }
+    menu_model_->AddItem(kNewWindow, label("移到新窗口", "Move to New Window"));
+    return;
   }
-  menu_runner_ = std::make_unique<views::MenuRunner>(menu_model_.get(), views::MenuRunner::CONTEXT_MENU);
-  menu_runner_->RunMenuAt(GetWidget(), nullptr, gfx::Rect(point, gfx::Size()),
-                           views::MenuAnchorPosition::kTopLeft, type);
-  ScheduleRefresh();
+  if (!workspace_->model().FindSpace(menu_space_)) return;
+  menu_model_->AddItem(kRename, label("重命名 Space…", "Rename Space…"));
+  menu_model_->AddItem(kAppearance, label("更改 Space 颜色", "Change Space Color"));
+  if (IsCommandIdEnabled(kSpaceIcon))
+    menu_model_->AddItem(kSpaceIcon, label("更改 Space 图标…", "Change Space Icon…"));
+  menu_model_->AddItem(kRemoveSpace, label("删除 Space…", "Delete Space…"));
+  menu_model_->AddSeparator(ui::NORMAL_SEPARATOR);
+  if (menu_space_ == active_space_id_) {
+    menu_model_->AddItem(kFolder, label("新建文件夹", "New Folder"));
+    if (IsCommandIdEnabled(kSave))
+      menu_model_->AddItem(kSave, label("固定当前页面", "Pin Current Page"));
+  }
+  menu_model_->AddItem(kAllSpaces, label("查看所有 Space", "All Spaces…"));
+  menu_model_->AddItem(kNewSpace, label("新建 Space", "New Space"));
+  menu_model_->AddItem(kPreviousSpace, label("上一个 Space", "Previous Space"));
+  menu_model_->AddItem(kNextSpace, label("下一个 Space", "Next Space"));
 }
 
 void SpaceNavigationView::BuildFolderMenu(const SavedItem& folder) {
@@ -3102,7 +3827,11 @@ std::vector<tabs::TabHandle> SpaceNavigationView::FolderOpenTabs(
 
 bool SpaceNavigationView::IsCommandIdEnabled(int command) const {
   const auto* item = workspace_->model().FindItem(menu_item_);
-  if (command == kSettings || command == kSpaceIcon) return !browser_->GetProfile()->IsOffTheRecord();
+  if (command == kSpaceIcon) return !browser_->GetProfile()->IsOffTheRecord();
+  if (command == kRemoveSpace)
+    return !workspace_->load_error() && SpaceRemovalTarget(workspace_->model(), menu_space_);
+  if (command == kPreviousSpace || command == kNextSpace)
+    return workspace_->model().spaces().size() > 1;
   if (command == kNewWindow && item && item->kind == SavedKind::kFolder) return false;
   if (command == kRename) return !menu_item_.starts_with("@tab:");
   if (command == kClose && item) return LiveItem(item->id).has_value();
@@ -3118,7 +3847,14 @@ bool SpaceNavigationView::IsCommandIdEnabled(int command) const {
 void SpaceNavigationView::ExecuteCommand(int command, int) {
   auto* item = workspace_->model().FindItem(menu_item_);
   const auto parent = item && item->kind == SavedKind::kFolder ? item->id : std::string();
-  if (command == kRename) BeginRename(item ? item->id : active_space_id_, !item);
+  if (!model_ || !workspace_->model().FindSpace(menu_space_) ||
+      (!menu_item_.empty() && menu_space_ != active_space_id_) ||
+      ((command == kFolder || command == kSave) && menu_space_ != active_space_id_) ||
+      !IsCommandIdEnabled(command)) return;
+  if (command == kRename) {
+    if (!item && menu_space_ != active_space_id_) ActivateSpace(menu_space_);
+    BeginRename(item ? item->id : menu_space_, !item);
+  }
   else if (command == kFolder) NewFolder(parent);
   else if (command == kToggleFolder && !parent.empty()) {
     OpenItem(parent);
@@ -3135,9 +3871,12 @@ void SpaceNavigationView::ExecuteCommand(int command, int) {
   else if (command == kSave) SaveCurrent(parent, false);
   else if (command == kFavorite) SaveCurrent({}, true);
   else if (command == kNewSpace) CreateSpace();
-  else if (command == kSettings) OpenSettings();
-  else if (command == kSpaceIcon) OpenSettings();
-  else if (command == kAppearance) ShowAppearance();
+  else if (command == kAllSpaces) ShowSpaceChooser();
+  else if (command == kPreviousSpace) SwitchRelativeSpace(-1);
+  else if (command == kNextSpace) SwitchRelativeSpace(1);
+  else if (command == kSpaceIcon) OpenSpaceSettings(menu_space_);
+  else if (command == kAppearance) ShowAppearance(menu_space_);
+  else if (command == kRemoveSpace) ConfirmRemoveSpace(menu_space_);
   else if (command == kNewWindow) {
     std::optional<tabs::TabHandle> handle;
     if (item) { OpenItem(item->id); handle = LiveItem(item->id); }
@@ -3155,10 +3894,6 @@ void SpaceNavigationView::ExecuteCommand(int command, int) {
       const auto destination = folder_menu_destinations_[index];
       ApplyDrop(this, parent, {Area::kSaved, destination, {}, {}, 0, nullptr});
     }
-  } else if (command >= kSwitchSpaceBase) {
-    const int index = command - kSwitchSpaceBase;
-    const auto& spaces = workspace_->model().spaces();
-    if (index < static_cast<int>(spaces.size())) ActivateSpace(spaces[index].id);
   }
   else if (command == kRemove && item) {
     workspace_->model().RemoveItem(item->id); workspace_->Commit();
@@ -3231,6 +3966,35 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   static bool started = false;
   if (started) return;
   started = true;
+  const auto* command = base::CommandLine::ForCurrentProcess();
+  if (command->HasSwitch("tai-test-capture-window")) {
+    auto* widget = GetWidget();
+    if (!widget || !widget->GetCompositor()) return;
+    auto* compositor = widget->GetCompositor();
+    compositor->root_layer()->RequestCopyOfOutput(
+        std::make_unique<viz::CopyOutputRequest>(
+            viz::CopyOutputRequest::ResultFormat::RGBA,
+            viz::CopyOutputRequest::ResultDestination::kSystemMemory,
+            base::BindOnce(
+                [](base::FilePath path,
+                   std::unique_ptr<viz::CopyOutputResult> result) {
+                  const auto pixels = result->ScopedAccessSkBitmap();
+                  const auto& bitmap = pixels.bitmap();
+                  if (bitmap.empty()) return;
+                  auto bytes = gfx::PNGCodec::EncodeBGRASkBitmap(
+                      bitmap, /*discard_transparency=*/true);
+                  if (!bytes) return;
+                  base::ThreadPool::PostTask(
+                      FROM_HERE, {base::MayBlock()},
+                      base::BindOnce([](base::FilePath output,
+                                        std::vector<uint8_t> png) {
+                        base::WriteFile(output, png);
+                      }, std::move(path), std::move(*bytes)));
+                },
+                data_dir.AppendASCII("ReadmeWindow.png"))));
+    compositor->ScheduleDraw();
+    return;
+  }
   SyncTabs();
   base::ListValue checks;
   RunShortcutValidationChecks(checks);
@@ -3481,39 +4245,56 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
          swipe_preview_ && swipe_preview_space_id_ == b &&
              swipe_preview_->IsDrawn() && swipe_preview_->layer()->parent() &&
              swipe_preview_->layer()->transform().To2dTranslation().x() ==
-                 space_body_->width() - 21.f &&
+                 body_->parent()->width() - 21.f &&
              preview_has_pin(preview_has_pin, swipe_preview_) &&
              row_items_.size() == rows_before_swipe &&
              !swipe_preview_->GetCanProcessEventsWithinSubtree());
+  const auto painted_backdrop = [](views::View* view) {
+    gfx::Canvas sample(gfx::Size(2, 2), 1.f, false);
+    view->GetBackground()->Paint(&sample, view);
+    return sample.GetBitmap().getColor(0, 0);
+  };
+  expect("the incoming title and rows have transparent backgrounds",
+         !animate || (swipe_preview_ && swipe_preview_title_ &&
+             !swipe_preview_->GetBackground() &&
+             !swipe_preview_title_->GetBackground()));
+  expect("the shared sidebar starts changing color before the Space switches",
+         !animate || (painted_backdrop(this) == gfx::Tween::ColorValueBetween(
+             21.f / body_->parent()->width(), 0xffccddf2, 0xff35333f) &&
+             SidebarBackdropColor() != SidebarColor()));
   send_scroll(42, 0, ui::EventMomentumPhase::NONE, 15);
   expect("reversing direction previews the previous Space on the other side",
          !animate ? !swipe_preview_ :
          swipe_preview_ && swipe_preview_space_id_ == AdjacentSpaceId(-1) &&
              swipe_preview_->layer()->transform().To2dTranslation().x() ==
-                 21.f - space_body_->width() && active_space_id_ == a);
+                 21.f - body_->parent()->width() && active_space_id_ == a);
   send_scroll(0, 0, ui::EventMomentumPhase::END, 20);
   expect("lifting after a short swipe returns the same Space",
          active_space_id_ == a && dragged->GetTargetTransform().IsIdentity() &&
              dragged->GetTargetOpacity() == 1.f &&
              (!animate || (swipe_preview_ &&
                  swipe_preview_->layer()->GetTargetTransform().To2dTranslation().x() ==
-                     -space_body_->width())));
+                     -body_->parent()->width())));
   FinishSpaceTransition();
+  expect("cancelling the swipe restores the original backdrop immediately",
+         painted_backdrop(this) == 0xffccddf2 && !swipe_preview_ &&
+             !swipe_preview_title_);
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 30);
   send_scroll(-45, 0, ui::EventMomentumPhase::NONE, 40);
   send_scroll(-40, 0, ui::EventMomentumPhase::NONE, 70);
-  const float entrance = swipe_preview_
-      ? swipe_preview_->layer()->transform().To2dTranslation().x() : 0.f;
   expect("crossing the distance threshold still waits for lift", active_space_id_ == a);
   send_scroll(0, 0, ui::EventMomentumPhase::END, 75);
+  expect("lift settles the same two lists without rebuilding rows on the input path",
+         !animate || (active_space_id_ == a && settling_swipe_direction_ == 1 &&
+             swipe_preview_ && swipe_preview_->layer()->GetTargetTransform().IsIdentity() &&
+             space_body_->layer()->GetTargetOpacity() == 0.f &&
+             swipe_backdrop_animation_ && SidebarBackdropColor() != SidebarColor()));
+  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
   Refresh();
-  expect("lift switches and sends the outgoing Space onward as the next slides in",
-         active_space_id_ == b &&
-             (!animate || (outgoing_space_layer_ &&
-                 outgoing_space_layer_->transform().To2dTranslation().x() < 0.f &&
-                 outgoing_space_layer_->GetTargetOpacity() == 0.f &&
-                 space_body_->layer()->transform().To2dTranslation().x() == entrance &&
-                 space_body_->layer()->GetTargetOpacity() == 1.f)));
+  expect("the settled swipe activates the destination and resets its transform",
+         active_space_id_ == b && space_body_->layer()->transform().IsIdentity());
+  expect("committing the swipe paints the destination backdrop immediately",
+         painted_backdrop(this) == 0xff35333f);
   send_scroll(-150, 0, ui::EventMomentumPhase::INERTIAL_UPDATE, 100);
   send_scroll(0, 0, ui::EventMomentumPhase::END, 130);
   expect("trackpad momentum cannot switch again", active_space_id_ == b);
@@ -3522,11 +4303,187 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   send_scroll(85, 0, ui::EventMomentumPhase::NONE, 170);
   expect("right swipe over blank sidebar waits for lift", active_space_id_ == b);
   send_scroll(0, 0, ui::EventMomentumPhase::END, 185);
+  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
   Refresh();
   expect("right swipe over blank sidebar returns to the previous Space",
          active_space_id_ == a);
   FinishSpaceTransition();
+  widget->LayoutRootViewIfNecessary();
+  if (animate) {
+    // Sample the actual window compositor. Painting the Background on a
+    // scratch Canvas cannot detect stale textures in other Views layers.
+    const auto rail = views::View::ConvertRectToTarget(this, root, GetLocalBounds());
+    const auto list_bounds = views::View::ConvertRectToTarget(
+        body_->parent(), root, body_->parent()->GetLocalBounds());
+    const auto title_bounds = views::View::ConvertRectToTarget(
+        title_clip_, root, title_clip_->GetLocalBounds());
+    const int right_target = list_bounds.right() - list_bounds.width() / 5;
+    const int left_target = list_bounds.x() + list_bounds.width() / 5;
+    const int frame_y = std::max(12, rail.y() / 2);
+    const int title_y = title_bounds.y() + 4;
+    const int list_y = list_bounds.bottom() - 10;
+    const int footer_y = rail.bottom() - 4;
+    const std::array probes = {
+        gfx::Point(rail.x() + 18, frame_y),
+        gfx::Point(rail.x() + 18, rail.y() + 4),
+        gfx::Point(rail.x() + 4, rail.bottom() - 12),
+        gfx::Point(right_target, frame_y),
+        gfx::Point(right_target, title_y),
+        gfx::Point(right_target, list_y),
+        gfx::Point(right_target, footer_y),
+        gfx::Point(left_target, frame_y),
+        gfx::Point(left_target, title_y),
+        gfx::Point(left_target, list_y),
+        gfx::Point(left_target, footer_y),
+    };
+    using RailProbes = decltype(probes);
+    using RailSamples = std::array<SkColor, probes.size()>;
+    const auto capture = [&] {
+      RailSamples colors{};
+      base::RunLoop loop(base::RunLoop::Type::kNestableTasksAllowed);
+      widget->GetCompositor()->root_layer()->RequestCopyOfOutput(
+          std::make_unique<viz::CopyOutputRequest>(
+              viz::CopyOutputRequest::ResultFormat::RGBA,
+              viz::CopyOutputRequest::ResultDestination::kSystemMemory,
+              base::BindOnce([](RailSamples* colors, RailProbes probes,
+                                gfx::Size root_size, base::OnceClosure done,
+                                std::unique_ptr<viz::CopyOutputResult> result) {
+                const auto pixels = result->ScopedAccessSkBitmap();
+                const auto& bitmap = pixels.bitmap();
+                if (!bitmap.empty()) {
+                  for (size_t i = 0; i < probes.size(); ++i) {
+                    const int x = probes[i].x() * bitmap.width() / root_size.width();
+                    const int y = probes[i].y() * bitmap.height() / root_size.height();
+                    if (x >= 0 && x < bitmap.width() && y >= 0 && y < bitmap.height())
+                      (*colors)[i] = bitmap.getColor(x, y);
+                  }
+                }
+                std::move(done).Run();
+              }, &colors, probes, root->size(), loop.QuitClosure())));
+      widget->GetCompositor()->ScheduleDraw();
+      loop.Run();
+      return colors;
+    };
+    const auto idle_colors = capture();
+    PreviewSpaceSwipe(-body_->parent()->width() * 0.35f);
+    const auto dragging = capture();
+    VLOG(1) << "TAi compositor rail samples: " << std::hex
+            << idle_colors[0] << "/" << idle_colors[1] << "/" << idle_colors[2]
+            << " -> " << dragging[0] << "/" << dragging[1] << "/" << dragging[2];
+    const auto visibly_changed = [&](size_t i) {
+      return SkColorGetA(idle_colors[i]) == SK_AlphaOPAQUE &&
+             SkColorGetA(dragging[i]) == SK_AlphaOPAQUE &&
+             !SimilarColors(idle_colors[i], dragging[i]);
+    };
+    expect("composited frame, upper sidebar and footer change during the held swipe",
+           active_space_id_ == a && visibly_changed(0) && visibly_changed(1) &&
+               visibly_changed(2));
+    const auto target_is_continuous = [](const RailSamples& colors, size_t first) {
+      return SkColorGetA(colors[first]) == SK_AlphaOPAQUE &&
+             colors[first] == colors[first + 1] &&
+             colors[first] == colors[first + 2] &&
+             colors[first] == colors[first + 3];
+    };
+    expect("the incoming Space matches its upper and lower rails during a left swipe",
+           target_is_continuous(dragging, 3) && dragging[3] == dragging[2]);
+    PreviewSpaceSwipe(body_->parent()->width() * 0.35f);
+    const auto reversed_colors = capture();
+    expect("the incoming Space matches its upper and lower rails during a right swipe",
+           target_is_continuous(reversed_colors, 7) && reversed_colors[7] == reversed_colors[2]);
+    FinishSpaceTransition();
+    const auto cancelled = capture();
+    expect("all three composited rails return to their initial colors on cancellation",
+           idle_colors == cancelled && active_space_id_ == a);
+    const float settling_offset = -body_->parent()->width() * 0.35f;
+    PreviewSpaceSwipe(settling_offset);
+    CompleteSpaceSwipe(settling_offset, /*flick=*/false);
+    const auto landing_colors = capture();
+    expect("the incoming Space and its upper and lower rails share the same transition on lift",
+           settling_swipe_direction_ == 1 && active_space_id_ == a &&
+               target_is_continuous(landing_colors, 3) && landing_colors[3] == landing_colors[2]);
+    base::RunLoop landing(base::RunLoop::Type::kNestableTasksAllowed);
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, landing.QuitClosure(), kSwipeEntryDuration + base::Milliseconds(80));
+    landing.Run();
+    const auto landed_colors = capture();
+    expect("the title, list and footer finish in the destination palette together",
+           active_space_id_ == b && !settling_swipe_direction_ &&
+               target_is_continuous(landed_colors, 3) &&
+               SimilarColors(landed_colors[3], SidebarColor()));
+    SelectSpace(a, /*animate=*/false);
+    Refresh();
+  }
   ws.RemoveItem(preview_pin);
+
+  const auto* original_space = ws.FindSpace(a);
+  const std::string original_color = SpaceColorHex(original_space->color);
+  const std::string original_edition(workspace_->edition());
+  ws.SetSpaceColor(a, "#F0D763");
+  const auto sample_rail = [this] {
+    gfx::Canvas sample(size(), 1.f, false);
+    GetBackground()->Paint(&sample, this);
+    const auto pixels = sample.GetBitmap();
+    return std::array{
+        pixels.getColor(width() / 6, 1),
+        pixels.getColor(width() * 2 / 3, 1),
+        pixels.getColor(width() / 6, height() - 2),
+        pixels.getColor(width() * 2 / 3, height() - 2),
+    };
+  };
+  workspace_->SetEdition("standard");
+  const auto atrium_colors = sample_rail();
+  expect("Atrium paints the selected color solid across the whole sidebar",
+         std::ranges::all_of(atrium_colors, [](SkColor color) {
+           return color == 0xfff0d763;
+         }));
+  workspace_->SetEdition("pride");
+  const auto pride_colors = sample_rail();
+  expect("Pride keeps the selected yellow and adds spectrum at both fixed ends",
+         SidebarColor() == 0xfff0d763 && pride_colors[0] != pride_colors[1] &&
+         pride_colors[2] != pride_colors[3] && pride_colors[0] != atrium_colors[0]);
+  const auto yellow = BackdropColors();
+  const auto blue = MakeSidebarBackdrop(0xff5569b6, true);
+  const auto charcoal = MakeSidebarBackdrop(0xff37313e, true);
+  const auto hue = [](SkColor color) {
+    color_utils::HSL hsl;
+    color_utils::SkColorToHSL(color, &hsl);
+    return hsl.h * 360;
+  };
+  expect("Pride derives warm and cool gradients from their respective base hues",
+         yellow.stops[2] == 0xfff0d763 && blue.stops[2] == 0xff5569b6 &&
+             hue(yellow.stops.front()) < hue(yellow.base) &&
+             hue(yellow.stops.back()) > hue(yellow.base) &&
+             hue(blue.stops.front()) < hue(blue.base) &&
+             hue(blue.stops.back()) > hue(blue.base) &&
+             std::ranges::all_of(charcoal.stops, [](SkColor color) {
+               return color_utils::GetContrastRatio(SK_ColorWHITE, color) >= 4.5f;
+             }));
+  expect("Pride keeps white sidebar text readable across its cool gradient",
+         std::ranges::all_of(blue.stops, [](SkColor color) {
+           return color_utils::GetContrastRatio(SK_ColorWHITE, color) >= 4.5f;
+         }));
+  ws.SetSpaceColor(a, original_color);
+  workspace_->SetEdition(original_edition);
+
+  // Native toolbar/navigation notifications with the same rendered inputs
+  // must preserve the row hierarchy, while a workspace edit invalidates it.
+  Render();
+  views::ViewTracker retained_rows;
+  retained_rows.SetView(space_body_);
+  Refresh();
+  expect("unchanged sidebar refresh reuses its native rows",
+         retained_rows.view() == space_body_);
+  const auto refresh_pin = NewId();
+  ws.AddItem({refresh_pin, a, {}, "Refresh pin",
+              "https://example.invalid/refresh", SavedKind::kPage});
+  workspace_->Commit();
+  Refresh();
+  expect("workspace changes rebuild the sidebar with the new saved row",
+         !retained_rows.view() &&
+             std::ranges::any_of(row_items_, [&](const auto& entry) {
+               return entry.second == refresh_pin;
+             }));
+  ws.RemoveItem(refresh_pin);
 
   // Give both Spaces distinct scroll positions past the first viewport.
   std::vector<std::string> scroll_items;
@@ -3579,7 +4536,6 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   expect("direct Space selection restores that Space's scroll position",
          scrolled_second && std::abs(SpaceScrollOffset(b) - second_offset) < 0.01f &&
              wait_for_offset(first_offset));
-  const int previous_layer_y = space_body_->layer()->bounds().y();
   const float next_swipe = base::i18n::IsRTL() ? 1.f : -1.f;
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 200);
   send_scroll(next_swipe * 85.f, 0, ui::EventMomentumPhase::NONE, 210);
@@ -3588,14 +4544,13 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
              (!animate || (swipe_preview_space_id_ == b &&
                             preview_offset() == second_offset)));
   send_scroll(0, 0, ui::EventMomentumPhase::END, 225);
+  expect("lift keeps the source scroll position throughout compositor settling",
+         !animate || (settling_swipe_direction_ && current_offset() == first_offset));
+  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
   Refresh();
   widget->LayoutRootViewIfNecessary();
-  expect("swipe commit keeps both columns at their positions",
-         active_space_id_ == b &&
-             (!animate || (outgoing_space_layer_ &&
-                 outgoing_space_layer_->bounds().y() ==
-                     previous_layer_y - first_offset)) &&
-             wait_for_offset(second_offset));
+  expect("swipe commit replaces the preview at the destination scroll position",
+         active_space_id_ == b && wait_for_offset(second_offset));
   FinishSpaceTransition();
   send_scroll(0, 0, ui::EventMomentumPhase::MAY_BEGIN, 250);
   send_scroll(-next_swipe * 85.f, 0, ui::EventMomentumPhase::NONE, 260);
@@ -3604,6 +4559,7 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
              (!animate || (swipe_preview_space_id_ == a &&
                             preview_offset() == first_offset)));
   send_scroll(0, 0, ui::EventMomentumPhase::END, 275);
+  if (settling_swipe_direction_) OnSpaceTransitionFinished(transition_generation_);
   Refresh();
   widget->LayoutRootViewIfNecessary();
   expect("reverse swipe restores the previous Space's scroll position",
@@ -3805,7 +4761,7 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
         location_bar->GetBackgroundColorForTesting() == *page_chrome_color_;
   }));
   const SkColor website_focus =
-      GetColorProvider()->GetColor(ui::kColorSysStateFocusRing);
+      GetColorProvider()->GetColor(kColorOmniboxResultsFocusIndicator);
   expect("toolbar edge follows same-palette dynamic page colors",
       edge_color() == SkColorSetRGB(23,59,54) &&
       edge_color(0x534244) == SkColorSetRGB(23,59,54));
@@ -3835,13 +4791,12 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     return page_chrome_color_ && page_chrome_color_ == dark_page.Get()->GetContents()->GetBackgroundColor();
   }));
   const SkColor home_focus =
-      GetColorProvider()->GetColor(ui::kColorSysStateFocusRing);
+      GetColorProvider()->GetColor(kColorOmniboxResultsFocusIndicator);
   color_utils::HSL home_focus_hsl;
   color_utils::SkColorToHSL(home_focus, &home_focus_hsl);
   expect("the address bar focus uses a contrasting Atrium purple and follows page hues",
       home_focus != website_focus && home_focus_hsl.h > 0.69 &&
       home_focus_hsl.h < 0.76 &&
-      GetColorProvider()->GetColor(ui::kColorFocusableBorderFocused) == home_focus &&
       page_chrome_color_ && color_utils::GetContrastRatio(home_focus, *page_chrome_color_) >= 3.f);
   chrome::FocusLocationBar(browser_);
   expect("empty focused home address bar stays on the home canvas", wait_for([&] {
@@ -3859,6 +4814,40 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     return page_chrome_color_ && dark_page.Get()->GetContents()->GetBackgroundColor() == page_chrome_color_ &&
         location_bar->GetBackgroundColorForTesting() == *page_chrome_color_;
   }));
+  bool branded_buttons = true;
+  bool branded_states = true;
+  for (bool dark : {false, true}) {
+    auto key = GetNativeTheme()->GetColorProviderKey(nullptr);
+    key.color_mode = dark ? ui::ColorProviderKey::ColorMode::kDark
+                          : ui::ColorProviderKey::ColorMode::kLight;
+    key.contrast_mode = ui::ColorProviderKey::ContrastMode::kNormal;
+    key.forced_colors = ui::ColorProviderKey::ForcedColors::kNone;
+    const auto* baseline = ui::ColorProviderManager::Get().GetColorProviderFor(key);
+    for (int accent = 0; accent < kAccentCount; ++accent) {
+      ui::ColorProvider provider;
+      auto& base_colors = provider.AddMixer();
+      for (auto id : {ui::kColorSysSurface, ui::kColorSysOnSurface})
+        base_colors[id] = {baseline->GetColor(id)};
+      PageChromePalette(ToolbarPalette::kNative, accent, accent)
+          .AddColorMixers(&provider, key);
+      const auto foreground = provider.GetColor(ui::kColorSysOnPrimary);
+      const auto background = provider.GetColor(ui::kColorSysPrimary);
+      branded_buttons &= color_utils::GetContrastRatio(foreground, background) >= 4.5f;
+      branded_states &= provider.GetColor(ui::kColorTextSelectionBackground) != background &&
+          provider.GetColor(ui::kColorSysStateFocusRing) == AccentColor(accent, dark);
+    }
+  }
+  expect("brand actions have readable text in light and dark across all Space accents",
+      branded_buttons);
+  expect("selection and keyboard focus each have a color from the Space palette",
+      branded_states);
+  expect("normal window actions, links and checkboxes use the same brand primary",
+      GetColorProvider()->GetColor(ui::kColorButtonBackgroundProminent) ==
+          GetColorProvider()->GetColor(ui::kColorSysPrimary) &&
+      GetColorProvider()->GetColor(ui::kColorLinkForegroundDefault) ==
+          GetColorProvider()->GetColor(ui::kColorSysPrimary) &&
+      GetColorProvider()->GetColor(ui::kColorCheckboxContainer) ==
+          GetColorProvider()->GetColor(ui::kColorSysPrimary));
   auto* avatar = toolbar->GetViewByID(VIEW_ID_AVATAR_BUTTON);
   expect("regular product windows have no visible browser account button", !avatar || !avatar->IsDrawn());
   expect("retired browser account commands cannot open their UI", !chrome::IsCommandEnabled(browser_, IDC_SHOW_AVATAR_MENU) &&
@@ -3932,9 +4921,7 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   ws.AddItem({reveal_child, active_space_id_, reveal_folder, "Reveal child",
               "https://example.invalid/reveal", SavedKind::kPage});
   {
-    base::AutoReset<std::string> menu_item(&menu_item_, reveal_folder);
-    menu_model_ = std::make_unique<ui::SimpleMenuModel>(this);
-    BuildFolderMenu(*ws.FindItem(reveal_folder));
+    PrepareContextMenu(reveal_folder);
     expect("folder menu contains folder actions and an independent Move to Space submenu",
         menu_model_->GetIndexOfCommandId(kRename).has_value() &&
         menu_model_->GetIndexOfCommandId(kToggleFolder).has_value() &&
@@ -3942,10 +4929,12 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
         !menu_model_->GetIndexOfCommandId(kCloseFolderTabs) &&
         !menu_model_->GetIndexOfCommandId(kClose) &&
         !menu_model_->GetIndexOfCommandId(kAppearance) &&
-        !menu_model_->GetIndexOfCommandId(kSwitchSpaceBase));
-    menu_model_.reset();
-    folder_move_menu_.reset();
-    folder_menu_destinations_.clear();
+        !menu_model_->GetIndexOfCommandId(kRemoveSpace));
+    PrepareContextMenu({});
+    expect("blank sidebar can manage its Space",
+        menu_model_->GetIndexOfCommandId(kAppearance).has_value() &&
+        menu_model_->GetIndexOfCommandId(kRemoveSpace).has_value() &&
+        menu_model_->GetIndexOfCommandId(kAllSpaces).has_value());
   }
   // Let queued tab and theme notifications from the preceding navigation run.
   wait_for([&] { return !refresh_pending_; });
@@ -4059,7 +5048,75 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   ws.AddItem({numbered_page, mru_space, {}, "Closed pinned page", "https://example.invalid/numbered", SavedKind::kPage});
   SelectNumberedTab(0);
   expect("numbered shortcuts can open a closed pinned sidebar page", LiveItem(numbered_page) && model_->GetActiveTab() == LiveItem(numbered_page)->Get());
+  const auto removed_space = NewId();
+  ws.AddSpace({removed_space, "Space to remove", "current-profile"});
+  const auto preserved_folder = NewId();
+  ws.AddItem({preserved_folder, removed_space, {}, "Saved folder", {}, SavedKind::kFolder});
+  const auto preserved_pin = NewId();
+  ws.AddItem({preserved_pin, removed_space, preserved_folder, "Saved pin",
+              "https://example.invalid/preserved", SavedKind::kPage});
+  PrepareContextMenu({}, removed_space);
+  expect("a background Space icon configures its own Space without selecting it",
+      menu_space_ == removed_space && active_space_id_ == mru_space &&
+      menu_model_->GetIndexOfCommandId(kAppearance).has_value() &&
+      IsCommandIdEnabled(kRemoveSpace));
+  ActivateSpace(removed_space);
+  NewTab();
+  const auto preserved_tab = model_->GetActiveTab()->GetHandle();
+  RemoveSpaceAndMoveContents(removed_space, mru_space);
+  expect("deleting a Space moves its live tabs and saved folder tree together",
+      !ws.FindSpace(removed_space) && active_space_id_ == mru_space &&
+      bindings_.at(preserved_tab.raw_value()).space_id == mru_space &&
+      model_->GetActiveTab() == preserved_tab.Get() &&
+      ws.FindItem(preserved_folder)->space_id == mru_space &&
+      ws.FindItem(preserved_pin)->parent_id == preserved_folder);
+  model_->ActivateTab(LiveItem(numbered_page)->Get());
   workspace_->SetShortcutOverrides(old_overrides.Clone());
+  {
+    const auto empty_one = NewId(), empty_two = NewId(), empty_three = NewId();
+    ws.AddSpace({empty_one, "Empty Home 1", "current-profile"});
+    ws.AddSpace({empty_two, "Empty Home 2", "current-profile"});
+    ws.AddSpace({empty_three, "Empty Home 3", "current-profile"});
+    const auto pinned = model_->GetActiveTab()->GetHandle();
+    ActivateSpace(empty_one);
+    const auto home = model_->GetActiveTab()->GetHandle();
+    const bool ready = wait_for([&] {
+      return home.Get()->GetContents()->GetLastCommittedURL() ==
+                 ProductNewTabURL(browser_) &&
+             !home.Get()->GetContents()->IsLoading();
+    });
+    const int tab_count = model_->count();
+    const auto is_same_home = [&](const std::string& space) {
+      return model_->GetActiveTab() == home.Get() && model_->count() == tab_count &&
+             bindings_.at(home.raw_value()) == TabOrganization{space, {}, true} &&
+             !home.Get()->GetContents()->GetController().GetPendingEntry();
+    };
+    ActivateSpace(empty_two);
+    const bool first_switch = is_same_home(empty_two);
+    ActivateSpace(empty_three);
+    const bool second_switch = is_same_home(empty_three);
+    ActivateSpace(empty_one);
+    expect("switching across empty Spaces keeps the same Home document and tab count",
+           ready && first_switch && second_switch && is_same_home(empty_one));
+    ActivateSpace(mru_space);
+    expect("returning to a populated Space restores its active page",
+           model_->GetActiveTab() == pinned.Get());
+    ActivateSpace(empty_two);
+    expect("entering an empty Space from a page reuses the loaded Home placeholder",
+           is_same_home(empty_two));
+    const GURL fixture("data:text/html,Empty%20Space%20navigation");
+    const bool navigated = navigate(home, fixture);
+    ActivateSpace(empty_three);
+    expect("a navigated Home belongs to its current Space and is never reused",
+           navigated && model_->GetActiveTab() != home.Get() &&
+               bindings_.at(home.raw_value()) == TabOrganization{empty_two, {}, false});
+    ActivateSpace(empty_two);
+    NewTab();
+    expect("an explicit New Tab still creates an ordinary tab in this Space",
+           model_->GetActiveTab() != home.Get() &&
+               bindings_.at(model_->GetActiveTab()->GetHandle().raw_value()) ==
+                   TabOrganization{empty_two, {}, false});
+  }
   workspace_->Commit(); Render();
   FinishSmokeTest(std::move(checks));
 }

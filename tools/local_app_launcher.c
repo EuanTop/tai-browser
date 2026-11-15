@@ -42,11 +42,11 @@ int main(int argc, char** argv) {
   args[next++] = "--sidebar-browser";
   args[next++] = TAI_PROFILE_ARGUMENT;
   args[next++] = "--no-first-run";
-  args[next++] = "--no-default-browser-check";
   args[next++] = "--restore-last-session";
   args[next++] = TAI_AGENT_NODE_ARGUMENT;
   args[next++] = TAI_AGENT_ENTRY_ARGUMENT;
 #if TAI_QA_CANDIDATE
+  args[next++] = "--no-default-browser-check";
   args[next++] = "--use-mock-keychain";
 #endif
   for (int i = 1; i < argc; ++i) args[next++] = argv[i];

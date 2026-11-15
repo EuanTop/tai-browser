@@ -34,6 +34,11 @@ COMMANDS = 'chrome/browser/ui/browser_commands.cc'
 RESTORE = 'chrome/browser/ui/browser_tabrestore.cc'
 SESSION_RESTORE = 'chrome/browser/sessions/session_restore.cc'
 SESSION_SERVICE = 'chrome/browser/sessions/session_service_base.cc'
+STARTUP_INFOBARS = 'chrome/browser/ui/startup/infobar_utils.cc'
+DEFAULT_BROWSER_INFOBARS = (
+    'chrome/browser/ui/startup/default_browser_prompt/default_browser_infobar_delegate.cc',
+    'chrome/browser/ui/startup/default_browser_prompt/default_browser_infobar_manager.cc',
+)
 CONTEXT = 'chrome/browser/ui/browser_live_tab_context.cc'
 TOOLBAR = 'chrome/browser/ui/views/toolbar/toolbar_view.cc'
 LOCATION = 'chrome/browser/ui/views/location_bar/location_bar_view.cc'
@@ -42,6 +47,7 @@ BROWSER_VIEW = 'chrome/browser/ui/views/frame/browser_view.cc'
 PAGES = 'chrome/browser/ui/chrome_pages.cc'
 COMMAND_CONTROLLER = 'chrome/browser/ui/browser_command_controller.cc'
 KEY_DISPATCH = 'chrome/browser/ui/cocoa/chrome_command_dispatcher_delegate.mm'
+COCOA_TEXT_INPUT = 'components/remote_cocoa/app_shim/bridged_content_view.mm'
 MULTI_CONTENTS = 'chrome/browser/ui/views/frame/multi_contents_view.cc'
 RELOAD = 'chrome/browser/ui/views/toolbar/reload_button.cc'
 WEBUI_RELOAD = 'chrome/browser/ui/views/toolbar/webui_reload_control.cc'
@@ -55,6 +61,22 @@ FOCUS = 'chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_de
 BINDERS = 'chrome/browser/chrome_browser_interface_binders.cc'
 PANEL_IDS = 'chrome/browser/ui/side_panel/side_panel_entry_id.h'
 PANEL_ID_IMPL = 'chrome/browser/ui/side_panel/side_panel_entry_id.cc'
+SEARCH_FEATURES = 'chrome/browser/metrics/chrome_feature_list_creator.cc'
+SEARCH_METRICS_BUILD = 'chrome/browser/metrics/BUILD.gn'
+SEARCH_CONTROLLER = ('chrome/browser/ui/omnibox/omnibox_everywhere/'
+                     'omnibox_everywhere_controller.cc')
+SEARCH_BACKGROUND = ('chrome/browser/background/omnibox_everywhere/'
+                     'omnibox_everywhere_background_mode_manager.cc')
+SEARCH_WEBUI = 'chrome/browser/ui/webui/omnibox_everywhere/omnibox_everywhere_ui.cc'
+SEARCH_MANAGER = ('chrome/browser/ui/omnibox/omnibox_everywhere/'
+                  'omnibox_everywhere_ui_manager')
+SEARCH_RESOURCES = 'chrome/browser/resources/omnibox_everywhere/'
+GLOBAL_SEARCH_FILES = (SEARCH_FEATURES, SEARCH_METRICS_BUILD, SEARCH_CONTROLLER,
+                       SEARCH_BACKGROUND, SEARCH_WEBUI,
+                       SEARCH_MANAGER + '.cc', SEARCH_MANAGER + '.h',
+                       *(SEARCH_RESOURCES + name for name in (
+                           'BUILD.gn', 'app.ts', 'app.css', 'omnibox.css',
+                           'profile_icon.html.ts', 'profile_icon.css')))
 BRAND_ASSETS = {
     'kProductIcon': 'brand/atrium/product-icon-64.png',
     'kAboutIcon': 'brand/atrium/product-icon-256.png',
@@ -88,7 +110,299 @@ def upstream(path):
     return subprocess.check_output(['git', 'show', 'HEAD:' + path], cwd=SOURCE)
 
 
+def global_search_changes():
+    mode = 'base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser")'
+    features = replace_once(upstream(SEARCH_FEATURES).decode(),
+        '#include "chrome/common/chrome_paths.h"',
+        '#include "chrome/common/chrome_paths.h"\n'
+        '#if BUILDFLAG(IS_MAC)\n'
+        '#include "chrome/browser/ui/omnibox/omnibox_next_features.h"\n'
+        '#endif')
+    features = replace_once(features,
+        '  variations_service->SetUpFieldTrials(\n'
+        '      variation_ids,\n'
+        '      content::GetSwitchDependentFeatureOverrides(\n'
+        '          *base::CommandLine::ForCurrentProcess()),\n'
+        '      std::move(feature_list), browser_field_trials_.get());',
+        '  auto overrides = content::GetSwitchDependentFeatureOverrides(\n'
+        '      *base::CommandLine::ForCurrentProcess());\n'
+        '#if BUILDFLAG(IS_MAC)\n'
+        f'  if ({mode}) {{\n'
+        '    overrides.emplace_back(omnibox::kOmniboxEverywhere,\n'
+        '                           base::FeatureList::OVERRIDE_ENABLE_FEATURE);\n'
+        '    // TAi already exposes this shortcut in its own settings.\n'
+        '    overrides.emplace_back(omnibox::kOmniboxEverywhereFre,\n'
+        '                           base::FeatureList::OVERRIDE_DISABLE_FEATURE);\n'
+        '  }\n'
+        '#endif\n'
+        '  variations_service->SetUpFieldTrials(\n'
+        '      variation_ids, overrides, std::move(feature_list),\n'
+        '      browser_field_trials_.get());')
+    metrics = replace_once(upstream(SEARCH_METRICS_BUILD).decode(),
+        '  if (enable_pdf) {\n    deps += [ "//components/pdf/browser" ]',
+        '  if (is_mac) {\n'
+        '    deps += [ "//chrome/browser/ui/omnibox" ]\n'
+        '  }\n\n'
+        '  if (enable_pdf) {\n    deps += [ "//components/pdf/browser" ]')
+    controller = replace_once(upstream(SEARCH_CONTROLLER).decode(),
+        'namespace omnibox_everywhere {\n',
+        'namespace omnibox_everywhere {\n\n'
+        'namespace {\n'
+        'bool UsesTaiShortcut() {\n'
+        f'  return BUILDFLAG(IS_MAC) && {mode};\n'
+        '}\n'
+        '}  // namespace\n')
+    controller = replace_once(controller,
+        'void OmniboxEverywhereController::UpdateHotkeyRegistration() {\n',
+        'void OmniboxEverywhereController::UpdateHotkeyRegistration() {\n'
+        '  if (UsesTaiShortcut()) {\n'
+        '    return;\n'
+        '  }\n')
+    controller = replace_once(controller,
+        '  if (source == InvocationSource::kGlobalHotkey) {\n'
+        '    if (!IsHotkeyEnabled()) {',
+        '  if (source == InvocationSource::kGlobalHotkey && !UsesTaiShortcut()) {\n'
+        '    if (!IsHotkeyEnabled()) {')
+    controller = replace_once(controller,
+        '  // Enable background mode/launch on startup the first time this is invoked.\n'
+        '  if (g_browser_process && g_browser_process->local_state()) {',
+        '  // Enable background mode/launch on startup the first time this is invoked.\n'
+        '  if (!UsesTaiShortcut() && g_browser_process &&\n'
+        '      g_browser_process->local_state()) {')
+    background = replace_once(upstream(SEARCH_BACKGROUND).decode(),
+        '#include "base/check.h"',
+        '#include "base/check.h"\n#include "base/command_line.h"')
+    background = replace_once(background,
+        'void OmniboxEverywhereBackgroundModeManager::OnPrefChanged() {\n',
+        'void OmniboxEverywhereBackgroundModeManager::OnPrefChanged() {\n'
+        f'  if (BUILDFLAG(IS_MAC) && {mode}) {{\n'
+        '    Reset();\n'
+        '    return;\n'
+        '  }\n')
+    webui = upstream(SEARCH_WEBUI).decode()
+    if '#include "base/command_line.h"' not in webui:
+        webui = replace_once(webui, '#include "base/feature_list.h"',
+            '#include "base/command_line.h"\n#include "base/feature_list.h"')
+    webui = replace_once(webui,
+        '  std::string profile_avatar_url =\n',
+        f'  const bool tai_style = BUILDFLAG(IS_MAC) && {mode};\n'
+        '  source->AddBoolean("taiStyle", tai_style);\n'
+        '  bool tai_default_avatar = tai_style;\n'
+        '  std::string profile_avatar_url =\n')
+    webui = replace_once(webui,
+        '    if (entry) {\n      gfx::Image icon = profiles::GetSizedAvatarIcon(',
+        '    if (entry) {\n'
+        '      tai_default_avatar = tai_style && entry->IsUsingDefaultAvatar() &&\n'
+        '                           !entry->GetGAIAPicture();\n'
+        '      gfx::Image icon = profiles::GetSizedAvatarIcon(')
+    webui = replace_once(webui,
+        '  source->AddBoolean("omniboxEverywhereProfilePickerEnabled",\n'
+        '                     omnibox::kOmniboxEverywhereProfilePickerParam.Get());',
+        '  source->AddBoolean("taiDefaultAvatar", tai_default_avatar);\n'
+        '  source->AddBoolean("omniboxEverywhereProfilePickerEnabled",\n'
+        '                     !tai_style &&\n'
+        '                         omnibox::kOmniboxEverywhereProfilePickerParam.Get());')
+    manager_header = replace_once(upstream(SEARCH_MANAGER + '.h').decode(),
+        '  // Closes the Omnibox Everywhere widget.',
+        '  // The supplier has process lifetime and only themes this popup.\n'
+        '  void SetTaiPalette(ui::ColorProviderKey::InitializerSupplier& palette);\n\n'
+        '  // Closes the Omnibox Everywhere widget.')
+    manager_header = replace_once(manager_header,
+        '  std::unique_ptr<views::Widget> widget_;',
+        '  raw_ptr<ui::ColorProviderKey::InitializerSupplier> tai_palette_ = nullptr;\n'
+        '  std::unique_ptr<views::Widget> widget_;')
+    manager = replace_once(upstream(SEARCH_MANAGER + '.cc').decode(),
+        'bool IsFuseboxEligible(Profile* profile) {',
+        '''class TaiSearchWidget final : public views::Widget {
+ public:
+  explicit TaiSearchWidget(ui::ColorProviderKey::InitializerSupplier& palette)
+      : palette_(&palette) {}
+
+  void SetPalette(ui::ColorProviderKey::InitializerSupplier& palette) {
+    if (palette_ == &palette) {
+      return;
+    }
+    palette_ = &palette;
+    ResetLastColorProviderKey();
+    ScheduleThemeChanged();
+  }
+
+  ui::ColorProviderKey GetColorProviderKey() const override {
+    auto key = views::Widget::GetColorProviderKey();
+    key.app_controller = palette_.get();
+    return key;
+  }
+
+ private:
+  raw_ptr<ui::ColorProviderKey::InitializerSupplier> palette_;
+};
+
+bool IsFuseboxEligible(Profile* profile) {''')
+    manager = replace_once(manager,
+        'void OmniboxEverywhereUIManager::CreateAndInitWidget(',
+        '''void OmniboxEverywhereUIManager::SetTaiPalette(
+    ui::ColorProviderKey::InitializerSupplier& palette) {
+  // A native entry point can have created the widget before the TAi shortcut.
+  if (widget_ && !tai_palette_) {
+    CleanUpWidget();
+  }
+  tai_palette_ = &palette;
+  if (widget_) {
+    static_cast<TaiSearchWidget*>(widget_.get())->SetPalette(palette);
+  }
+}
+
+void OmniboxEverywhereUIManager::CreateAndInitWidget(''')
+    manager = replace_once(manager,
+        '  widget_ = std::make_unique<views::Widget>();',
+        '''  if (tai_palette_) {
+    widget_ = std::make_unique<TaiSearchWidget>(*tai_palette_);
+  } else {
+    widget_ = std::make_unique<views::Widget>();
+  }''')
+    resources = {}
+
+    def style_file(name, before, after):
+        path = SEARCH_RESOURCES + name
+        original = resources[path].decode() if path in resources else upstream(path).decode()
+        resources[path] = replace_once(original, before, after).encode()
+
+    style_file('BUILD.gn',
+        '    "//ui/webui/resources/cr_components/composebox:build_ts",',
+        '    "//ui/webui/resources/cr_components/color_change_listener:build_ts",\n'
+        '    "//ui/webui/resources/cr_components/composebox:build_ts",')
+    style_file('app.ts',
+        "import type {ComposeboxState} from ",
+        "import {ColorChangeUpdater} from '//resources/cr_components/color_change_listener/colors_css_updater.js';\n"
+        "import type {ComposeboxState} from ")
+    style_file('app.ts',
+        '    super.connectedCallback();',
+        '''    super.connectedCallback();
+    if (loadTimeData.valueExists('taiStyle') && loadTimeData.getBoolean('taiStyle')) {
+      this.setAttribute('tai-style', '');
+      const colors = ColorChangeUpdater.forDocument();
+      colors.start();
+      // Covers the first load as well as changes while the cached popup is hidden.
+      void colors.refreshColorsCss();
+    }''')
+    style_file('app.css',
+        ':host([small-loomnibox]) {',
+        '''@media (forced-colors: none) and (prefers-contrast: no-preference) {
+  :host([tai-style]) {
+    --tai-search-accent: var(--color-searchbox-results-focus-indicator);
+    --tai-search-tint: color-mix(in srgb, var(--tai-search-accent) 11%, transparent);
+    --color-searchbox-results-background-selected: var(--tai-search-tint);
+    --cr-focus-outline-color: var(--tai-search-accent);
+  }
+
+  :host([tai-style]) :is(omnibox-everywhere-omnibox, omnibox-everywhere-composebox) {
+    --color-composebox-type-ahead-chip: var(--tai-search-tint);
+  }
+
+  :host([tai-style]) #mostVisitedContainer {
+    --most-visited-focus-shadow: 0 0 0 2px var(--tai-search-accent);
+  }
+}
+
+:host([small-loomnibox]) {''')
+    style_file('omnibox.css',
+        '  --color-searchbox-selection-background: rgba(26, 115, 232, 0.2);',
+        '  --color-searchbox-selection-background: '
+        'var(--tai-search-tint, rgba(26, 115, 232, 0.2));')
+    style_file('profile_icon.html.ts',
+        "import {html} from '//resources/lit/v3_0/lit.rollup.js';",
+        "import {html} from '//resources/lit/v3_0/lit.rollup.js';\n"
+        "import {loadTimeData} from '//resources/js/load_time_data.js';")
+    style_file('profile_icon.html.ts',
+        '      <img id="profileIcon" src="${this.profileAvatarUrl_}"\n'
+        '          alt="${this.i18n(\'profileButtonLabel\')}">',
+        '''      ${loadTimeData.valueExists('taiDefaultAvatar') &&
+                loadTimeData.getBoolean('taiDefaultAvatar') ? html`
+        <span id="taiAvatar" aria-hidden="true"><cr-icon icon="cr:person"></cr-icon></span>
+      ` : html`
+        <img id="profileIcon" src="${this.profileAvatarUrl_}"
+            alt="${this.i18n('profileButtonLabel')}">
+      `}''')
+    style_file('profile_icon.css',
+        ':host([is-enterprise-profile]) #profileContainer {',
+        '''#taiAvatar {
+  align-items: center;
+  background: var(--tai-search-tint, ButtonFace);
+  border-radius: 50%;
+  color: var(--tai-search-accent, ButtonText);
+  display: grid;
+  height: 20px;
+  justify-items: center;
+  width: 20px;
+}
+
+#taiAvatar cr-icon {
+  --iron-icon-height: 14px;
+  --iron-icon-width: 14px;
+}
+
+:host([is-enterprise-profile]) #profileContainer {''')
+    return {
+        SEARCH_FEATURES: features.encode(),
+        SEARCH_METRICS_BUILD: metrics.encode(),
+        SEARCH_CONTROLLER: controller.encode(),
+        SEARCH_BACKGROUND: background.encode(),
+        SEARCH_WEBUI: webui.encode(),
+        SEARCH_MANAGER + '.cc': manager.encode(),
+        SEARCH_MANAGER + '.h': manager_header.encode(),
+        **resources,
+    }
+
+
 def changes():
+    startup_infobars = upstream(STARTUP_INFOBARS).decode()
+    startup_infobars = replace_once(startup_infobars,
+        '#if !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_ANDROID)\n  if (is_web_app ||',
+        '#if !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_ANDROID)\n'
+        '#if BUILDFLAG(IS_MAC)\n'
+        '  if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser")) {\n'
+        '    if (!is_web_app && !IsKioskModeEnabled() && profile->IsRegularProfile() &&\n'
+        '        !startup_command_line.HasSwitch(switches::kNoDefaultBrowserCheck)) {\n'
+        '      ShowDefaultBrowserPrompt(profile, base::DoNothing());\n'
+        '    }\n'
+        '    return;\n'
+        '  }\n'
+        '#endif\n'
+        '  if (is_web_app ||')
+    default_delegate_path, default_manager_path = DEFAULT_BROWSER_INFOBARS
+    default_delegate = upstream(default_delegate_path).decode()
+    default_delegate = replace_once(default_delegate,
+        '#include "base/types/pass_key.h"',
+        '#include "base/command_line.h"\n#include "base/strings/string_util.h"\n'
+        '#include "base/types/pass_key.h"')
+    default_delegate = replace_once(default_delegate,
+        '  return dark_mode() ? features::IsRoundedIconsEnabled()',
+        '  if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser"))\n'
+        '    return vector_icons::kGlobeIcon;\n'
+        '  return dark_mode() ? features::IsRoundedIconsEnabled()')
+    default_delegate = replace_once(default_delegate,
+        '  return l10n_util::GetStringUTF16(can_pin_to_taskbar_\n'
+        '                                       ? IDS_DEFAULT_BROWSER_PIN_INFOBAR_TEXT\n'
+        '                                       : IDS_DEFAULT_BROWSER_INFOBAR_TEXT);',
+        '  auto message = l10n_util::GetStringUTF16(can_pin_to_taskbar_\n'
+        '                                      ? IDS_DEFAULT_BROWSER_PIN_INFOBAR_TEXT\n'
+        '                                      : IDS_DEFAULT_BROWSER_INFOBAR_TEXT);\n'
+        '  if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser")) {\n'
+        '    base::ReplaceSubstringsAfterOffset(\n'
+        '        &message, 0, l10n_util::GetStringUTF16(IDS_PRODUCT_NAME), u"TAi Browser");\n'
+        '  }\n'
+        '  return message;')
+    default_manager = upstream(default_manager_path).decode()
+    default_manager = replace_once(default_manager,
+        '#include "base/functional/bind.h"',
+        '#include "base/command_line.h"\n#include "base/functional/bind.h"')
+    default_manager = replace_once(default_manager,
+        'bool IsMigrated() {\n  return infobars::IsInfoBarMigrated(',
+        'bool IsMigrated() {\n'
+        '  // TAi uses its branded prompt from the native confirm delegate.\n'
+        '  if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser"))\n'
+        '    return false;\n'
+        '  return infobars::IsInfoBarMigrated(')
     omni_input = upstream(OMNIBOX_INPUT).decode()
     omni_input = replace_once(omni_input, '#include "chrome/browser/ui/omnibox/chrome_omnibox_client.h"',
         '#include "chrome/browser/ui/omnibox/chrome_omnibox_client.h"\n#include "base/command_line.h"\n#include "sidebar_browser/internal_urls.h"')
@@ -147,6 +461,14 @@ def changes():
         '      "//ui/base/dragdrop/mojom",\n'
         '      "//ui/views",\n'
         '    ]\n'
+        '    if (is_mac) {\n'
+        '      deps += [\n'
+        '        ":browser_process",\n'
+        '        ":global_features",\n'
+        '        "//chrome/browser/ui/omnibox",\n'
+        '        "//chrome/browser/ui/omnibox/omnibox_everywhere",\n'
+        '      ]\n'
+        '    }\n'
         '  }\n'
         '}\n\n' + target_anchor)
     region = upstream(REGION).decode()
@@ -254,6 +576,7 @@ def changes():
     location = upstream(LOCATION).decode()
     location = replace_once(location, '#include "chrome/browser/ui/views/location_bar/location_bar_view.h"',
         '#include "chrome/browser/ui/views/location_bar/location_bar_view.h"\n'
+        '#include "base/command_line.h"\n'
         '#include "sidebar_browser/space_navigation_view.h"')
     location = replace_once(location,
         '  background_color_ = gfx::Tween::ColorValueBetween(opacity, normal, hovered);\n  if (is_caret_visible) {',
@@ -270,6 +593,13 @@ def changes():
         '          ? SK_ColorWHITE : SK_ColorBLACK, *color, static_cast<SkAlpha>(12));\n'
         '    }\n  }\n'
         '  background_color_ = gfx::Tween::ColorValueBetween(opacity, normal, hovered);\n  if (is_caret_visible && !quiet_home) {')
+    location = replace_once(location,
+        '    views::FocusRing::Get(this)->SetOutsetFocusRingDisabled(true);',
+        '    views::FocusRing::Get(this)->SetOutsetFocusRingDisabled(true);\n'
+        '    if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser") &&\n'
+        '        !browser_->GetProfile()->IsOffTheRecord()) {\n'
+        '      views::FocusRing::Get(this)->SetColorId(kColorOmniboxResultsFocusIndicator);\n'
+        '    }')
     widget = upstream(WIDGET).decode()
     widget = replace_once(widget, '#include "chrome/browser/ui/views/frame/browser_widget.h"',
         '#include "chrome/browser/ui/views/frame/browser_widget.h"\n'
@@ -317,6 +647,12 @@ def changes():
         '  if (sidebar::RouteShortcut(browser_.get(),\n'
         '          ui::GetAcceleratorFromNativeWebKeyboardEvent(event),\n'
         '          sidebar::ShortcutPhase::kAfterResponder) == sidebar::ShortcutResult::kHandled) return true;\n')
+    cocoa_text = replace_once(
+        upstream(COCOA_TEXT_INPUT).decode(),
+        '    _bridge->text_input_host()->GetFirstRectForRange(gfx::Range(range), &rect,\n'
+        '                                                     &actualRange);',
+        '    _bridge->text_input_host()->GetFirstRectForRange(\n'
+        '        gfx::Range::FromPossiblyInvalidNSRange(range), &rect, &actualRange);')
     key_dispatch = upstream(KEY_DISPATCH).decode()
     key_dispatch = replace_once(key_dispatch,
         '#include "base/check.h"',
@@ -730,8 +1066,8 @@ def changes():
         '      url, formatted_url, ChromeAutocompleteSchemeClassifier(GetProfile()), nullptr);\n'
         '  return base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser")\n'
         '      ? sidebar::DisplayTaiURL(url, std::move(formatted)) : formatted;')
-    return {**settings_overlay.changes(upstream, replace_once), OMNIBOX_INPUT: omni_input.encode(), SCHEME_CLASSIFIER: scheme.encode(), LOCATION_IDENTITY: identity.encode(), PAGES: pages.encode(), COMMAND_CONTROLLER: controller.encode(), KEY_DISPATCH: key_dispatch.encode(), **reload_sources, ext_toolbar_path: ext_toolbar.encode(), panel_path: panel.encode(), themed_path: themed.encode(), main_bg_path: main_bg.encode(), mac_path: mac.encode(), OMNIBOX: omnibox.encode(), FOCUS: focus.encode(), BINDERS: binders.encode(), PANEL_IDS: panel_ids.encode(), PANEL_ID_IMPL: panel_impl.encode(), UNTRUSTED: untrusted.encode(), BUILD: build.encode(), WEBUI: webui.encode(), REGION: region.encode(), STATE: state.encode(),
-            COMMANDS: commands.encode(), RESTORE: restore.encode(), SESSION_RESTORE: session_restore.encode(), SESSION_SERVICE: session_service.encode(), CONTEXT: context.encode(), TOOLBAR: toolbar.encode(), LOCATION: location.encode(), WIDGET: widget.encode(), BROWSER_VIEW: browser_view.encode(), MULTI_CONTENTS: multi_contents.encode()}
+    return {**settings_overlay.changes(upstream, replace_once), **global_search_changes(), OMNIBOX_INPUT: omni_input.encode(), SCHEME_CLASSIFIER: scheme.encode(), LOCATION_IDENTITY: identity.encode(), PAGES: pages.encode(), COMMAND_CONTROLLER: controller.encode(), KEY_DISPATCH: key_dispatch.encode(), COCOA_TEXT_INPUT: cocoa_text.encode(), **reload_sources, ext_toolbar_path: ext_toolbar.encode(), panel_path: panel.encode(), themed_path: themed.encode(), main_bg_path: main_bg.encode(), mac_path: mac.encode(), OMNIBOX: omnibox.encode(), FOCUS: focus.encode(), BINDERS: binders.encode(), PANEL_IDS: panel_ids.encode(), PANEL_ID_IMPL: panel_impl.encode(), UNTRUSTED: untrusted.encode(), BUILD: build.encode(), WEBUI: webui.encode(), REGION: region.encode(), STATE: state.encode(),
+            COMMANDS: commands.encode(), RESTORE: restore.encode(), SESSION_RESTORE: session_restore.encode(), SESSION_SERVICE: session_service.encode(), STARTUP_INFOBARS: startup_infobars.encode(), default_delegate_path: default_delegate.encode(), default_manager_path: default_manager.encode(), CONTEXT: context.encode(), TOOLBAR: toolbar.encode(), LOCATION: location.encode(), WIDGET: widget.encode(), BROWSER_VIEW: browser_view.encode(), MULTI_CONTENTS: multi_contents.encode()}
 
 
 def stage():

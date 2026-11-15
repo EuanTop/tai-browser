@@ -13,6 +13,7 @@
 #include "base/task/thread_pool.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "sidebar_browser/branding.h"
 #include "sidebar_browser/localization.h"
@@ -130,6 +131,16 @@ NSImage* SpaceSymbolImage(const char* name) {
   add("新建 Space", "New Space", @"new_space", ready);
   add("上一个 Space", "Previous Space", @"previous_space", multiple);
   add("下一个 Space", "Next Space", @"next_space", multiple);
+  add("查看所有 Space", "All Spaces…", @"all_spaces", ready);
+  if (ready) {
+    [menu addItem:[NSMenuItem separatorItem]];
+    const bool editable = !workspace->load_error();
+    add("重命名 Space…", "Rename Space…", @"rename_space", editable);
+    add("更改 Space 颜色", "Change Space Color", @"color_space", editable);
+    add("更改 Space 图标…", "Change Space Icon…", @"icon_space",
+        editable && !profile->IsOffTheRecord());
+    add("删除 Space…", "Delete Space…", @"remove_space", navigation->CanRemoveCurrentSpace());
+  }
   if (!ready || workspace->model().spaces().empty()) return;
 
   [menu addItem:[NSMenuItem separatorItem]];
@@ -266,29 +277,6 @@ int CommandForItem(NSMenuItem* item) {
   return 0;
 }
 
-void UpdateDockIcon(Profile* profile) {
-  const auto* workspace = WorkspaceState::ForProfile(profile);
-  if (!workspace->loaded()) return;
-  static bool pride_applied = false;
-  const bool pride = workspace->edition() == "pride";
-  if (pride == pride_applied) return;
-  if (!pride) {
-    [NSApp setApplicationIconImage:nil];
-    pride_applied = false;
-    return;
-  }
-  static NSImage* const pride_icon = []() -> NSImage* {
-    std::string bytes;
-    if (!base::Base64Decode(brand_resources::kPrideIcon, &bytes)) return nil;
-    return [[NSImage alloc]
-        initWithData:[NSData dataWithBytes:bytes.data() length:bytes.size()]];
-  }();
-  if (pride_icon) {
-    [NSApp setApplicationIconImage:pride_icon];
-    pride_applied = true;
-  }
-}
-
 void UpdateItems(NSMenu* menu, BrowserWindowInterface* browser,
                  std::string_view language) {
   for (NSMenuItem* item in menu.itemArray) {
@@ -411,10 +399,7 @@ void UpdateShortcutMenu(BrowserWindowInterface* browser) {
     if (!view || !view->GetWidget() || !view->GetWidget()->IsActive()) return;
     if (!SpaceNavigationView::From(browser)) browser = nullptr;
   }
-  if (browser) {
-    UpdateDockIcon(browser->GetProfile());
-    PrepareMenuLocales();
-  }
+  if (browser) PrepareMenuLocales();
   [SpacesMenuController() setBrowser:browser];
   const std::string language = browser
       ? WorkspaceState::ForProfile(browser->GetProfile())->language() : "";

@@ -47,7 +47,7 @@ If a runtime phase fails while source and compiled artifacts remain unchanged, `
 
 报告区分模块测试、原生运行检查和物理交互验收。截图不能证明触控板、拖放或焦点行为；MCP 配置已注册不能证明客户端已连接，合成客户端通过也不能冒称真实 Agent 模型对话成功。具体边界记录在[产品验收](docs/PRODUCT-ACCEPTANCE.md)。
 
-For README preview assets, run `node tools/capture_readme.mjs` from the integration checkout after a validated native build. It captures the compiled new-tab page using a synthetic Profile and records provenance in `docs/images/readme/capture.json`. Do not use personal browsing screenshots or old concepts depicting retired features as current product screenshots. Documentation-only changes need appropriate link, rendering and diff checks, not a Chromium rebuild.
+To refresh the README screenshot, run `node tools/capture_readme.mjs /path/to/TAi.app` from the repository root with a validated macOS development build. The browser captures its own native window using a disposable Profile with sample data. The script records image provenance in `docs/images/readme/capture.json`.
 
 ## Data and dependencies / 数据与依赖
 

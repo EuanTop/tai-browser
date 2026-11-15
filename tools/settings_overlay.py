@@ -22,11 +22,20 @@ ABOUT_ELEMENT = 'chrome/browser/resources/settings/about_page/about_page.ts'
 ABOUT_TAI = 'chrome/browser/resources/settings/about_page/tai_about_page.html.ts'
 SETTINGS_BUILD = 'chrome/browser/resources/settings/BUILD.gn'
 ROUTER = 'chrome/browser/resources/settings/router.ts'
+THEME_SOURCE = 'chrome/browser/ui/webui/theme_source.cc'
+MANAGEMENT_WEBUIS = (
+    ('downloads/downloads_ui.cc', 'downloads/manager.ts'),
+    ('history/history_ui.cc', 'history/app.ts'),
+    ('extensions/extensions_ui.cc', 'extensions/manager.ts'),
+    ('password_manager/password_manager_ui.cc', 'password_manager/password_manager_app.ts'),
+)
 NATIVE_FILES = (SETTINGS_UI, PAGE_INFO, APP_MENU, LOCATION_ICON, AVATAR,
                 IMPORT_DATA_HANDLER, MAIN_MENU, HISTORY_MENU, APP_CONTROLLER, BROWSER_MAC,
                 ACTION_APP_MENU, BOOKMARK_BAR, BOOKMARK_STAR)
 UPSTREAM_FILES = (*NATIVE_FILES, PEOPLE, SHELL, SHELL_TS, MENU, ABOUT,
-                  ABOUT_STYLE, ABOUT_ELEMENT, SETTINGS_BUILD, ROUTER)
+                  ABOUT_STYLE, ABOUT_ELEMENT, SETTINGS_BUILD, ROUTER, THEME_SOURCE,
+                  *(f'chrome/browser/ui/webui/{controller}' for controller, _ in MANAGEMENT_WEBUIS),
+                  *(f'chrome/browser/resources/{component}' for _, component in MANAGEMENT_WEBUIS))
 
 # TAi-owned presentation inside Chromium's existing Settings section and Lit
 # lifecycle. The non-product template, updater and legal notices stay upstream.
@@ -190,8 +199,59 @@ ABOUT_STRINGS = {
 }
 
 
+def browser_color_changes(upstream, replace):
+    changes = {}
+    for controller, component in MANAGEMENT_WEBUIS:
+        native = 'chrome/browser/ui/webui/' + controller
+        frontend = 'chrome/browser/resources/' + component
+        source = upstream(native).decode()
+        if '#include "base/command_line.h"' not in source:
+            # The public WebUI header is the first include in each controller.
+            header = '#include "chrome/browser/ui/webui/' + controller.removesuffix('.cc') + '.h"'
+            source = replace(source, header, header + '\n#include "base/command_line.h"')
+        source = replace(source, '  source->AddString("webuiRefresh2026",',
+            '  source->AddBoolean("isTaiBrowser",\n'
+            '      base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser"));\n'
+            '  source->AddString("webuiRefresh2026",')
+        changes[native] = source.encode()
+        source = replace(upstream(frontend).decode(),
+            "    if (enableWebuiRefresh2026) {\n      this.addThemedColors_();",
+            "    if (enableWebuiRefresh2026 || loadTimeData.getBoolean('isTaiBrowser')) {\n"
+            '      this.addThemedColors_();')
+        changes[frontend] = source.encode()
+    source = upstream(THEME_SOURCE).decode()
+    if '#include "base/command_line.h"' not in source:
+        source = replace(source, '#include "chrome/browser/ui/webui/theme_source.h"',
+            '#include "chrome/browser/ui/webui/theme_source.h"\n#include "base/command_line.h"')
+    source = replace(source,
+        '  std::move(callback).Run(\n'
+        '      base::MakeRefCounted<base::RefCountedString>(std::move(*css_content)));',
+        '  if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser") &&\n'
+        '      !profile_->IsOffTheRecord() &&\n'
+        '      web_contents->GetLastCommittedURL().SchemeIs(content::kChromeUIScheme)) {\n'
+        '    // Older browser WebUIs still reference these palette aliases.\n'
+        '    // Use the same live roles as the shared native and WebUI controls.\n'
+        '    css_content->append("\\nhtml:not(#z){");\n'
+        '    for (int tone : {50, 100, 200, 300, 400, 500, 600, 700}) {\n'
+        '      const SkColor color = color_provider.GetColor(tone < 300\n'
+        '          ? ui::kColorSysPrimaryContainer : ui::kColorSysPrimary);\n'
+        '      const std::string alias = "--google-blue-" + base::NumberToString(tone);\n'
+        '      css_content->append(alias).append(":");\n'
+        '      ui::FastAppendCssHexColor(color, *css_content);\n'
+        '      css_content->append(";").append(alias).append("-rgb:");\n'
+        '      ui::FastAppendRgbColor(color, *css_content);\n'
+        '      css_content->append(";");\n'
+        '    }\n'
+        '    css_content->append("}");\n'
+        '  }\n'
+        '  std::move(callback).Run(\n'
+        '      base::MakeRefCounted<base::RefCountedString>(std::move(*css_content)));')
+    changes[THEME_SOURCE] = source.encode()
+    return changes
+
+
 def changes(upstream, replace):
-    result = {}
+    result = browser_color_changes(upstream, replace)
     source = upstream(SETTINGS_UI).decode()
     source = replace(source, '#include "chrome/browser/ui/webui/settings/settings_ui.h"',
                      '#include "chrome/browser/ui/webui/settings/settings_ui.h"\n#include "sidebar_browser/branding.h"')
@@ -260,6 +320,9 @@ def changes(upstream, replace):
     source = replace(source, '  protected accessor narrow_: boolean = false;',
         '  protected accessor narrow_: boolean = false;\n'
         "  protected accessor isTaiBrowser_: boolean = loadTimeData.getBoolean('isTaiBrowser');")
+    source = replace(source,
+        '    if (enableThemedColors) {',
+        '    if (enableThemedColors || this.isTaiBrowser_) {')
     result[SHELL_TS] = source.encode()
     source = upstream(SHELL).decode()
     source = replace(source, '    </cr-toolbar>',

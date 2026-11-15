@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #ifndef SIDEBAR_BROWSER_SPACE_NAVIGATION_VIEW_H_
 #define SIDEBAR_BROWSER_SPACE_NAVIGATION_VIEW_H_
+#include <array>
 #include <deque>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -29,6 +31,7 @@
 #include "components/sessions/core/session_id.h"
 #include "sidebar_browser/sidebar_session.h"
 #include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
+#include "ui/color/color_provider_key.h"
 #include "ui/menus/simple_menu_model.h"
 #include "ui/views/context_menu_controller.h"
 #include "ui/views/controls/textfield/textfield_controller.h"
@@ -54,6 +57,11 @@ GURL ProductNewTabURL(BrowserWindowInterface*);
 class WorkspaceState;
 class FolderRevealView;
 struct SavedItem;
+struct SidebarBackdropColors {
+  SkColor base;
+  std::array<SkColor, 5> stops;
+  bool operator==(const SidebarBackdropColors&) const = default;
+};
 class SpaceNavigationView final : public views::BoxLayoutView,
                                   public TabStripModelObserver,
                                   public views::ContextMenuController,
@@ -70,12 +78,17 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   ~SpaceNavigationView() override;
   void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
   void ToggleSidebar();
+  bool CanRemoveCurrentSpace() const;
   const std::string& active_space_id() const { return active_space_id_; }
   void OnThemeChanged() override;
   SkColor SidebarColor() const;
+  SkColor SidebarBackdropColor() const;
+  SidebarBackdropColors BackdropColors() const;
+  ui::ColorProviderKey::InitializerSupplier& GlobalSearchPalette() const;
   bool HasPrideBackdrop() const;
   bool IsDark() const;
   std::optional<SkColor> page_chrome_color() const { return page_chrome_color_; }
+  std::optional<int> space_chrome_accent() const { return space_chrome_accent_; }
   int page_chrome_accent() const { return page_chrome_accent_; }
   void AddedToWidget() override;
   void RemovedFromWidget() override;
@@ -158,8 +171,15 @@ class SpaceNavigationView final : public views::BoxLayoutView,
                  DropLocation destination);
   void RegisterRow(views::View*, std::string key, Area area);
   void ClearDropFeedback();
-  void ShowAppearance();
+  void ShowAppearance(const std::string& id);
+  void ConfirmRemoveSpace(const std::string& id);
+  void RemoveSpaceAndMoveContents(std::string id, std::string destination);
   void UpdateFrameButton();
+  SkColor SidebarColorFor(const std::string& space_id) const;
+  void SetSwipeBackdrop(std::optional<SidebarBackdropColors> colors);
+  void ScheduleSidebarBackdropPaint();
+  void UpdateSidebarInk(bool dark);
+  void UpdateFrameButtonInk(bool dark);
   void SchedulePageChromeRefresh();
   void RefreshPageChrome();
   bool IsSpaceTransitionRunning() const;
@@ -167,7 +187,8 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void FinishSpaceTransition();
   void OnSpaceTransitionFinished(unsigned generation);
   void AnimateSpaceLayers(base::TimeDelta duration, float outgoing_offset,
-                          std::optional<float> preview_offset = std::nullopt);
+                          std::optional<float> preview_offset = std::nullopt,
+                          bool commit_swipe = false);
   void PlaySpaceTransition(std::optional<float> swipe_entrance);
   void PreviewSpaceSwipe(float offset);
   void CompleteSpaceSwipe(float offset, bool flick);
@@ -176,15 +197,21 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void ScheduleRefresh();
   void Refresh();
   void SyncTabs();
+  struct RenderState;
+  RenderState CaptureRenderState() const;
   void Render();
+  void Render(RenderState state);
   void ResetSpaceScrollContents();
   float SpaceScrollOffset(const std::string& space_id) const;
   void RestoreSpaceScrollAfterLayout(views::ScrollView* scroll);
   bool Swipe(float x, float y);
   void SwitchRelativeSpace(int delta);
   void ActivateSpace(std::string id);
+  void SelectSpace(std::string id, bool animate);
+  tabs::TabInterface* ReusableHomePlaceholder(tabs::TabInterface* preferred);
   void CreateSpace();
   void OpenSettings();
+  void OpenSpaceSettings(const std::string& id);
   void NewTab(bool placeholder = false);
   void CloseTab(tabs::TabHandle handle);
   void ClearTemporary();
@@ -213,10 +240,11 @@ class SpaceNavigationView final : public views::BoxLayoutView,
                            SkColor fallback_color,
                            std::optional<tabs::TabHandle> live = std::nullopt);
   void RenderTab(views::BoxLayoutView*, tabs::TabHandle, int depth,
-                 bool interactive);
+                 bool interactive, bool dark);
   void BeginRename(std::string id, bool space);
   void CommitRename();
   void ShowSpaceMenu();
+  void PrepareContextMenu(std::string key, std::string space_id = {});
   void BuildFolderMenu(const SavedItem& folder);
   std::vector<tabs::TabHandle> FolderOpenTabs(const SavedItem& folder) const;
   void ShowSpaceChooser();
@@ -234,6 +262,9 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   raw_ptr<views::View> swipe_preview_ = nullptr;
   raw_ptr<views::View> swipe_preview_title_ = nullptr;
   std::string swipe_preview_space_id_;
+  class SwipeBackdropAnimation;
+  std::unique_ptr<SwipeBackdropAnimation> swipe_backdrop_animation_;
+  std::optional<SidebarBackdropColors> swipe_backdrop_;
   // This window's positions are discarded when the sidebar is destroyed.
   std::map<std::string, float> space_scroll_offsets_;
   std::string rendered_space_id_;
@@ -245,6 +276,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   std::unique_ptr<PageChromeObserver> page_chrome_observer_;
   std::optional<SkColor> page_chrome_color_;
   int page_chrome_accent_ = 0;
+  std::optional<int> space_chrome_accent_;
   bool page_chrome_refresh_pending_ = false;
   class ClearObserver;
   struct PendingClear { std::string space; int position; std::unique_ptr<ClearObserver> observer; };
@@ -276,6 +308,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   std::unique_ptr<ui::Layer> outgoing_title_layer_;
   bool transition_from_swipe_ = false;
   bool swipe_preview_active_ = false;
+  int settling_swipe_direction_ = 0;
   std::map<std::string, raw_ptr<FolderRevealView>> folder_rows_;
   bool committing_folder_change_ = false;
   bool refresh_after_folder_reveal_ = false;
@@ -288,6 +321,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   std::string edit_id_;
   bool edit_space_ = false;
   std::string menu_item_;
+  std::string menu_space_;
   bool refresh_pending_ = false;
   bool collapsed_ = false;
   bool switching_ = false;
@@ -295,6 +329,8 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   float swipe_distance_ = 0;
   base::TimeTicks last_swipe_;
   base::TimeTicks last_scroll_;
+  std::unique_ptr<RenderState> rendered_state_;
+  unsigned favicon_generation_ = 0;
   std::map<std::string, gfx::Image> favicon_cache_;
   std::set<std::string> requested_favicons_;
   base::CancelableTaskTracker favicon_tasks_;

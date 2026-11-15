@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
       entry_size < 0 || (size_t)entry_size >= sizeof(entry))
     return fail("The application path is too long.");
 
-  const size_t fixed_count = 8;
+  const size_t fixed_count = 7;
   char** arguments = calloc((size_t)argc + fixed_count + 1, sizeof(*arguments));
   if (!arguments)
     return fail("The application could not allocate its launch arguments.");
@@ -70,7 +70,6 @@ int main(int argc, char** argv) {
   arguments[next++] = "--sidebar-browser";
   arguments[next++] = profile;
   arguments[next++] = "--no-first-run";
-  arguments[next++] = "--no-default-browser-check";
   arguments[next++] = "--restore-last-session";
   arguments[next++] = node;
   arguments[next++] = entry;

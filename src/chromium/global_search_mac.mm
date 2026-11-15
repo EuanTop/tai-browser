@@ -24,6 +24,8 @@
 #include "base/timer/timer.h"
 #include "chrome/browser/autocomplete/chrome_autocomplete_provider_client.h"
 #include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
+#include "chrome/browser/browser_process.h"
+#include "chrome/browser/global_features.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_observer.h"
 #include "chrome/browser/ui/browser_window/public/browser_collection.h"
@@ -31,6 +33,10 @@
 #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/navigator/browser_navigator.h"
 #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+#include "chrome/browser/ui/omnibox/omnibox_everywhere/omnibox_everywhere_controller.h"
+#include "chrome/browser/ui/omnibox/omnibox_everywhere/omnibox_everywhere_ui_manager.h"
+#include "chrome/browser/ui/omnibox/omnibox_everywhere_service_factory.h"
+#include "chrome/browser/ui/omnibox/omnibox_next_features.h"
 #include "components/omnibox/browser/autocomplete_controller.h"
 #include "components/omnibox/browser/autocomplete_controller_config.h"
 #include "components/omnibox/browser/autocomplete_enums.h"
@@ -196,6 +202,21 @@ class GlobalSearchController final : public ui::GlobalAcceleratorListener::Obser
     if (browser && SpaceNavigationView::From(browser)) last_browser_ = browser->GetWeakPtr();
     browser = Target();
     if (!browser || capturing_) return;
+    auto* profile = browser->GetProfile();
+    auto* features = g_browser_process ? g_browser_process->GetFeatures() : nullptr;
+    if (auto* native = features ? features->omnibox_everywhere_controller()
+                                : nullptr) {
+      if (omnibox::IsOmniboxEverywhereEnabled(profile) &&
+          OmniboxEverywhereServiceFactory::GetForProfile(profile)) {
+        if (ui_.panel.visible) Hide();
+        native->ui_manager()->SetTaiPalette(
+            SpaceNavigationView::From(browser)->GlobalSearchPalette());
+        native->OnInvoke(omnibox_everywhere::InvocationSource::kGlobalHotkey,
+                         profile);
+        return;
+      }
+      if (native->IsVisible()) native->Hide();
+    }
     if (!ui_) {
       ui_ = [[TaiSearchUI alloc] init];
       ui_.owner = this;

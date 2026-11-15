@@ -48,6 +48,7 @@ class WorkspaceModel {
  public:
   bool AddSpace(WorkspaceSpace space);
   bool ActivateSpace(const std::string& id);
+  bool RemoveSpace(std::string id, const std::string& destination);
   bool RenameSpace(const std::string& id, std::string name);
   bool SetSpaceColor(const std::string& id, std::string_view color);
   bool SetSpaceIcon(const std::string& id, std::string icon);

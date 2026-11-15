@@ -57,10 +57,30 @@ try{
   await browser.stop();browser=undefined;
   browser=await startNativeBrowser(resolve(binaryArg),profile);const state=await until(async()=>{const state=await browser.state();return state.ready&&state;});
   await browser.call('Network.enable');await browser.call('Page.navigate',{url:'chrome://tai/home.html'});
-  await until(()=>browser.evaluate("document.querySelector('#home-space')?.textContent.length>0"));
-  expect('TAi home identifies the actual active Space',await browser.evaluate(`document.querySelector('#home-space').textContent===${JSON.stringify(state.spaces[0].name)}`));
-  expect('home offers browser extensions and Agent entries',await browser.evaluate("!!document.querySelector('a[href=\"chrome://extensions/\"]')&&!!document.querySelector('#home-agent')"));
-  await browser.call('Accessibility.enable');expect('branded home remains accessible',(await browser.call('Accessibility.getFullAXTree')).nodes.some(n=>n.role?.value==='heading'&&n.name?.value==='为思考留出空间。'));
+  await until(()=>browser.evaluate("document.documentElement.dataset.edition==='standard'&&document.querySelector('.atrium-hero')?.naturalWidth>0"));
+  expect('home contains only the artwork',await browser.evaluate(`
+    document.body.innerText.trim()==='' &&
+    document.querySelector('main').children.length===1 &&
+    !!document.querySelector('main > img.atrium-hero') &&
+    !document.querySelector('a,button,input,footer,header')
+  `));
+  await browser.call('Accessibility.enable');
+  expect('the sole artwork has a localized accessible description',
+    (await browser.call('Accessibility.getFullAXTree')).nodes.some(node=>
+      node.role?.value==='image'&&node.name?.value==='自然光穿过圆形庭院，映照白色墙面和水面'));
+  for (const [width,height] of [[1434,904],[1000,260],[360,640]]) {
+    await browser.call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
+    expect(`home artwork fits and centers in a ${width} × ${height} viewport`,await browser.evaluate(`(()=>{
+      const hero=document.querySelector('.atrium-hero');
+      const {left,top,width,height,right,bottom}=hero.getBoundingClientRect();
+      return width>0 && height>0 && Math.abs(left+width/2-innerWidth/2)<1 &&
+        Math.abs(top+height/2-innerHeight/2)<1 && left>0 && top>0 &&
+        right<innerWidth && bottom<innerHeight &&
+        Math.abs(width/height-hero.naturalWidth/hero.naturalHeight)<0.02 &&
+        document.documentElement.scrollHeight===innerHeight;
+    })()`));
+  }
+  await browser.call('Emulation.clearDeviceMetricsOverride');
   for(const [url,path] of [['brand-standard-hero.png','brand/atrium/standard-hero.png'],['brand-standard-icon.png','brand/atrium/editions/standard-icon-aligned.png']]){
     await until(()=>browser.events.some(e=>e.method==='Network.responseReceived'&&e.params.response.url.endsWith('/'+url)));
     const event=browser.events.find(e=>e.method==='Network.responseReceived'&&e.params.response.url.endsWith('/'+url));
@@ -70,7 +90,10 @@ try{
   }
   const patch=await browser.command({protocol:'tai.v1',id:'home-theme',command:'settings.patch',scope:{profileId:state.profileId,spaceId:state.spaces[0].id},payload:{revision:state.revision,changes:{edition:'pride'}}});expect('home edition is a real persisted setting',patch.ok);
   await until(()=>browser.evaluate("document.documentElement.dataset.edition==='pride'&&document.querySelector('#home-icon').getAttribute('href')==='brand-pride-icon.png'"));
-  expect('Pride theme switches architecture and icon together',await browser.evaluate("getComputedStyle(document.querySelector('.atrium-hero')).backgroundImage.includes('brand-pride-hero.png')"));
+  expect('Pride theme switches architecture and icon together',await until(()=>browser.evaluate(`
+    document.querySelector('.atrium-hero').currentSrc.endsWith('/brand-pride-hero.png') &&
+    document.querySelector('.atrium-hero').naturalWidth===1817
+  `)));
   for (const [scheme,color] of [['light','rgb(248, 248, 251)'],['dark','rgb(27, 28, 42)']]) {
     await browser.call('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:scheme}]});
     await until(()=>browser.evaluate(`getComputedStyle(document.body).backgroundColor===${JSON.stringify(color)}`));
