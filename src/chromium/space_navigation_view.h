@@ -160,6 +160,8 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   void ClearDropFeedback();
   void ShowAppearance();
   void UpdateFrameButton();
+  SkColor SidebarColorFor(const std::string& space_id) const;
+  bool HasPrideBackdropFor(const std::string& space_id) const;
   void SchedulePageChromeRefresh();
   void RefreshPageChrome();
   bool IsSpaceTransitionRunning() const;
@@ -213,7 +215,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
                            SkColor fallback_color,
                            std::optional<tabs::TabHandle> live = std::nullopt);
   void RenderTab(views::BoxLayoutView*, tabs::TabHandle, int depth,
-                 bool interactive);
+                 bool interactive, bool dark);
   void BeginRename(std::string id, bool space);
   void CommitRename();
   void ShowSpaceMenu();
