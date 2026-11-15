@@ -788,22 +788,68 @@ class SidebarBackdrop final : public views::Background {
 constexpr std::pair<ui::ColorId, std::string_view> kChromePaletteColors[] = {CHROME_COLOR_IDS};
 #include "ui/color/color_id_map_macros.inc"
 constexpr int kPageAccentHues = 12;
+constexpr int kAtriumAccent = kPageAccentHues;
+constexpr int kPrideAccent = kAtriumAccent + 1;
+constexpr int kAccentCount = kPrideAccent + 1;
+
+double AccentHue(int accent) {
+  if (accent == kAtriumAccent) accent = 8;
+  if (accent == kPrideAccent) accent = 9;
+  return (accent + 0.5) / kPageAccentHues;
+}
 
 SkColor AccentColor(int accent, bool dark) {
   return color_utils::HSLToSkColor(
-      {(accent + 0.5) / kPageAccentHues, 0.43, dark ? 0.76 : 0.36},
-      SK_AlphaOPAQUE);
+      {AccentHue(accent), 0.43, dark ? 0.76 : 0.36}, SK_AlphaOPAQUE);
 }
 
 int PageAccentIndex(SkColor canvas, SkColor space_color, bool pride) {
   const auto channels = {SkColorGetR(canvas), SkColorGetG(canvas), SkColorGetB(canvas)};
   const auto [low, high] = std::minmax(channels);
   if (high - low >= 20) space_color = canvas;
-  if (!space_color) return pride ? 9 : 8;
+  const int fallback = pride ? kPrideAccent : kAtriumAccent;
+  if (!space_color) return fallback;
   color_utils::HSL hsl;
   color_utils::SkColorToHSL(space_color, &hsl);
   return hsl.s >= 0.08 ? static_cast<int>(hsl.h * kPageAccentHues) % kPageAccentHues
-                       : (pride ? 9 : 8);
+                       : fallback;
+}
+
+bool UsesSystemContrast(const ui::ColorProviderKey& key) {
+  return key.contrast_mode == ui::ColorProviderKey::ContrastMode::kHigh ||
+         key.forced_colors != ui::ColorProviderKey::ForcedColors::kNone;
+}
+
+void AddBrandAccents(ui::ColorMixer& mixer, bool dark, int accent) {
+  // Atrium uses the same action colors as TAi Settings. Custom Space
+  // colors contribute their hue while the controls retain readable contrast.
+  SkColor action = color_utils::HSLToSkColor(
+      {AccentHue(accent), 0.38, dark ? 0.77 : 0.32}, SK_AlphaOPAQUE);
+  if (accent == kAtriumAccent)
+    action = dark ? 0xffaaa1dc : 0xff39375f;
+  if (accent == kPrideAccent)
+    action = dark ? 0xffc9aff1 : 0xff5e477b;
+  const SkColor on_action = dark ? 0xff1c1d31 : SK_ColorWHITE;
+  const auto tonal = ui::AlphaBlend(ui::kColorSysPrimary, ui::kColorSysSurface,
+                                    dark ? 58 : 24);
+  mixer[ui::kColorSysPrimary] = {action};
+  mixer[ui::kColorSysOnPrimary] = {on_action};
+  mixer[ui::kColorSysSecondary] = {action};
+  mixer[ui::kColorSysOnSecondary] = {on_action};
+  mixer[ui::kColorSysPrimaryContainer] = {tonal};
+  mixer[ui::kColorSysSecondaryContainer] = {tonal};
+  mixer[ui::kColorSysTonalContainer] = {tonal};
+  mixer[ui::kColorSysOnPrimaryContainer] = {ui::kColorSysOnSurface};
+  mixer[ui::kColorSysOnSecondaryContainer] = {ui::kColorSysOnSurface};
+  mixer[ui::kColorSysOnTonalContainer] = {ui::kColorSysOnSurface};
+  mixer[ui::kColorSysTonalOutline] = {
+      ui::AlphaBlend(ui::kColorSysPrimary, ui::kColorSysSurface, 105)};
+  mixer[ui::kColorSysStateRipplePrimary] = {SkColorSetA(action, 0x42)};
+  mixer[ui::kColorSysStateTextHighlight] = {action};
+  mixer[ui::kColorSysStateOnTextHighlight] = {on_action};
+  mixer[ui::kColorAccent] = {action};
+  mixer[ui::kColorTextSelectionBackground] = {tonal};
+  mixer[ui::kColorTextSelectionForeground] = {ui::kColorSysOnSurface};
 }
 
 class SearchPalette final : public ui::ColorProviderKey::InitializerSupplier {
@@ -812,46 +858,58 @@ class SearchPalette final : public ui::ColorProviderKey::InitializerSupplier {
 
   void AddColorMixers(ui::ColorProvider* provider,
                       const ui::ColorProviderKey& key) const override {
-    if (key.contrast_mode == ui::ColorProviderKey::ContrastMode::kHigh ||
-        key.forced_colors != ui::ColorProviderKey::ForcedColors::kNone) {
-      return;
-    }
+    if (UsesSystemContrast(key)) return;
     const bool dark = key.color_mode == ui::ColorProviderKey::ColorMode::kDark;
     const SkColor accent = AccentColor(accent_, dark);
     auto& mixer = provider->AddMixer();
+    AddBrandAccents(mixer, dark, accent_);
     mixer[ui::kColorSysStateFocusRing] = {accent};
     mixer[kColorSearchboxResultsFocusIndicator] = {accent};
     mixer[kColorSearchboxResultsIconFocusedOutline] = {accent};
     mixer[kColorSearchboxResultsActionChipFocusOutline] = {accent};
-    mixer[kColorNewTabPageComposeboxSubmitButtonBackground] = {accent};
+    mixer[kColorNewTabPageComposeboxSubmitButtonBackground] = {ui::kColorSysPrimary};
   }
 
  private:
   const int accent_;
 };
 
+enum class ToolbarPalette { kNative, kLightPage, kDarkPage, kCount };
+
 class PageChromePalette final : public ui::ColorProviderKey::InitializerSupplier {
  public:
-  PageChromePalette(bool dark, int accent) : dark_(dark),
-      focus_color_(AccentColor(accent, dark)) {}
+  PageChromePalette(ToolbarPalette toolbar, int page_accent, int space_accent)
+      : toolbar_(toolbar), page_accent_(page_accent), space_accent_(space_accent) {}
   void AddColorMixers(ui::ColorProvider* provider, const ui::ColorProviderKey& key) const override {
+    if (UsesSystemContrast(key)) return;
+    const bool dark = key.color_mode == ui::ColorProviderKey::ColorMode::kDark;
+    auto& mixer = provider->AddMixer();
+    AddBrandAccents(mixer, dark, space_accent_);
+    const SkColor focus = AccentColor(space_accent_, dark);
+    mixer[ui::kColorFocusableBorderFocused] = {focus};
+    mixer[ui::kColorSysStateFocusRing] = {focus};
+    mixer[kColorOmniboxResultsFocusIndicator] = {focus};
+    if (toolbar_ == ToolbarPalette::kNative) return;
+    const bool dark_page = toolbar_ == ToolbarPalette::kDarkPage;
     auto reference_key = key;
     reference_key.app_controller = nullptr;
-    reference_key.color_mode = dark_ ? ui::ColorProviderKey::ColorMode::kDark
-                                     : ui::ColorProviderKey::ColorMode::kLight;
+    reference_key.color_mode = dark_page ? ui::ColorProviderKey::ColorMode::kDark
+                                          : ui::ColorProviderKey::ColorMode::kLight;
     const auto* reference = ui::ColorProviderManager::Get().GetColorProviderFor(reference_key);
-    auto& mixer = provider->AddMixer();
     for (const auto& [id, name] : kChromePaletteColors) {
       if (name.starts_with("kColorToolbar") || name.starts_with("kColorOmnibox") ||
           name.starts_with("kColorLocationBar")) mixer[id] = {reference->GetColor(id)};
     }
-    // Views and the WebUI toolbar use different Chromium focus tokens.
-    mixer[ui::kColorFocusableBorderFocused] = {focus_color_};
-    mixer[ui::kColorSysStateFocusRing] = {focus_color_};
+    // The address bar tracks the page edge. Other browser controls track the
+    // Space, even when the site above which they're shown has another color.
+    const auto page_focus = AccentColor(page_accent_, dark_page);
+    mixer[kColorOmniboxResultsFocusIndicator] = {page_focus};
   }
+
  private:
-  const bool dark_;
-  const SkColor focus_color_;
+  const ToolbarPalette toolbar_;
+  const int page_accent_;
+  const int space_accent_;
 };
 class PageChromeEdgeBackground final : public views::Background {
  public:
@@ -1456,23 +1514,36 @@ bool PaintPageChrome(gfx::Canvas* canvas, const views::View*, const BrowserView*
   return false;
 }
 void ApplyPageChromePalette(const BrowserView* browser, ui::ColorProviderKey& key) {
-  // The existing app-controller initializer belongs to PWAs; leave it intact.
-  if (key.app_controller) return;
-  const auto color = PageChromeColor(browser);
-  if (!color) return;
-  // A finite set of process-lifetime palettes keeps ColorProvider keys stable.
+  if (!browser || key.app_controller ||
+      !base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser") ||
+      browser->browser()->GetType() != BrowserWindowInterface::TYPE_NORMAL ||
+      browser->browser()->GetProfile()->IsOffTheRecord() ||
+      UsesSystemContrast(key)) {
+    return;
+  }
+  constexpr int kPaletteCount =
+      static_cast<int>(ToolbarPalette::kCount) * kAccentCount * kAccentCount;
   static const base::NoDestructor<
-      std::array<std::unique_ptr<PageChromePalette>, 2 * kPageAccentHues>> palettes([] {
-    std::array<std::unique_ptr<PageChromePalette>, 2 * kPageAccentHues> result;
-    for (int i = 0; i < 2 * kPageAccentHues; ++i)
-      result[i] = std::make_unique<PageChromePalette>(i >= kPageAccentHues,
-                                                     i % kPageAccentHues);
+      std::array<std::unique_ptr<PageChromePalette>, kPaletteCount>> palettes([] {
+    std::array<std::unique_ptr<PageChromePalette>, kPaletteCount> result;
+    for (int i = 0; i < kPaletteCount; ++i) {
+      result[i] = std::make_unique<PageChromePalette>(
+          static_cast<ToolbarPalette>(i / (kAccentCount * kAccentCount)),
+          (i / kAccentCount) % kAccentCount, i % kAccentCount);
+    }
     return result;
   }());
   const auto* sidebar =
       SpaceNavigationView::Get(browser->browser()->GetUnownedUserDataHost());
-  const int mode = color_utils::IsDark(*color) ? kPageAccentHues : 0;
-  key.app_controller = (*palettes)[mode + sidebar->page_chrome_accent()].get();
+  const auto color = sidebar ? sidebar->page_chrome_color() : std::nullopt;
+  const auto toolbar = !color ? ToolbarPalette::kNative :
+      (color_utils::IsDark(*color) ? ToolbarPalette::kDarkPage : ToolbarPalette::kLightPage);
+  const int space_accent = sidebar ? sidebar->space_chrome_accent().value_or(kAtriumAccent)
+                                  : kAtriumAccent;
+  const int page_accent = color ? sidebar->page_chrome_accent() : space_accent;
+  const int index = (static_cast<int>(toolbar) * kAccentCount + page_accent) *
+                    kAccentCount + space_accent;
+  key.app_controller = (*palettes)[index].get();
 }
 std::unique_ptr<views::Background> CreatePageChromeEdgeBackground(BrowserView& browser, bool layer_based) {
   return std::make_unique<PageChromeEdgeBackground>(browser, layer_based);
@@ -1497,9 +1568,9 @@ ui::ColorProviderKey::InitializerSupplier&
 SpaceNavigationView::GlobalSearchPalette() const {
   // ColorProvider keys outlive individual browser windows and Spaces.
   static const base::NoDestructor<
-      std::array<std::unique_ptr<SearchPalette>, kPageAccentHues>> palettes([] {
-    std::array<std::unique_ptr<SearchPalette>, kPageAccentHues> result;
-    for (int index = 0; index < kPageAccentHues; ++index) {
+      std::array<std::unique_ptr<SearchPalette>, kAccentCount>> palettes([] {
+    std::array<std::unique_ptr<SearchPalette>, kAccentCount> result;
+    for (int index = 0; index < kAccentCount; ++index) {
       result[index] = std::make_unique<SearchPalette>(index);
     }
     return result;
@@ -1642,16 +1713,20 @@ void SpaceNavigationView::RefreshPageChrome() {
     }
   }
   const auto* space = workspace_->model().FindSpace(active_space_id_);
-  const int accent = color ? PageAccentIndex(*color, space ? space->color : 0,
-                                             workspace_->edition() == "pride") : 0;
-  if (page_chrome_color_ == color && page_chrome_accent_ == accent) return;
+  const bool pride = workspace_->edition() == "pride";
+  const SkColor space_color = space ? space->color : 0;
+  const int space_accent = PageAccentIndex(SK_ColorWHITE, space_color, pride);
+  const int accent = color ? PageAccentIndex(*color, space_color, pride) : space_accent;
+  if (page_chrome_color_ == color && page_chrome_accent_ == accent &&
+      space_chrome_accent_ == space_accent) return;
   const bool palette_changed = !page_chrome_color_ || !color ||
       color_utils::IsDark(*page_chrome_color_) != color_utils::IsDark(*color) ||
-      page_chrome_accent_ != accent;
+      page_chrome_accent_ != accent || space_chrome_accent_ != space_accent;
   VLOG(1) << "TAi toolbar surface="
           << (!color ? "native" : color_utils::IsDark(*color) ? "dark-page" : "light-page");
   page_chrome_color_ = color;
   page_chrome_accent_ = accent;
+  space_chrome_accent_ = space_accent;
   auto* toolbar = BrowserView::GetBrowserViewForBrowser(browser_)->toolbar();
   // Native browser controls get a window-local palette; never override the
   // Widget color mode, which also controls webpage prefers-color-scheme.
@@ -4543,7 +4618,7 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
         location_bar->GetBackgroundColorForTesting() == *page_chrome_color_;
   }));
   const SkColor website_focus =
-      GetColorProvider()->GetColor(ui::kColorSysStateFocusRing);
+      GetColorProvider()->GetColor(kColorOmniboxResultsFocusIndicator);
   expect("toolbar edge follows same-palette dynamic page colors",
       edge_color() == SkColorSetRGB(23,59,54) &&
       edge_color(0x534244) == SkColorSetRGB(23,59,54));
@@ -4573,13 +4648,12 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     return page_chrome_color_ && page_chrome_color_ == dark_page.Get()->GetContents()->GetBackgroundColor();
   }));
   const SkColor home_focus =
-      GetColorProvider()->GetColor(ui::kColorSysStateFocusRing);
+      GetColorProvider()->GetColor(kColorOmniboxResultsFocusIndicator);
   color_utils::HSL home_focus_hsl;
   color_utils::SkColorToHSL(home_focus, &home_focus_hsl);
   expect("the address bar focus uses a contrasting Atrium purple and follows page hues",
       home_focus != website_focus && home_focus_hsl.h > 0.69 &&
       home_focus_hsl.h < 0.76 &&
-      GetColorProvider()->GetColor(ui::kColorFocusableBorderFocused) == home_focus &&
       page_chrome_color_ && color_utils::GetContrastRatio(home_focus, *page_chrome_color_) >= 3.f);
   chrome::FocusLocationBar(browser_);
   expect("empty focused home address bar stays on the home canvas", wait_for([&] {
@@ -4597,6 +4671,42 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
     return page_chrome_color_ && dark_page.Get()->GetContents()->GetBackgroundColor() == page_chrome_color_ &&
         location_bar->GetBackgroundColorForTesting() == *page_chrome_color_;
   }));
+  bool branded_buttons = true;
+  bool branded_states = true;
+  for (bool dark : {false, true}) {
+    auto key = GetWidget()->GetColorProviderKey();
+    key.color_mode = dark ? ui::ColorProviderKey::ColorMode::kDark
+                          : ui::ColorProviderKey::ColorMode::kLight;
+    key.contrast_mode = ui::ColorProviderKey::ContrastMode::kNormal;
+    key.forced_colors = ui::ColorProviderKey::ForcedColors::kNone;
+    // The cache owns supplier pointers, so use the process-lifetime window key
+    // for live probes and local providers for the complete palette coverage.
+    for (int accent = 0; accent < kAccentCount; ++accent) {
+      const auto* baseline = ui::ColorProviderManager::Get().GetColorProviderFor(key);
+      ui::ColorProvider provider;
+      auto& base_colors = provider.AddMixer();
+      for (auto id : {ui::kColorSysSurface, ui::kColorSysOnSurface})
+        base_colors[id] = {baseline->GetColor(id)};
+      PageChromePalette(ToolbarPalette::kNative, accent, accent)
+          .AddColorMixers(&provider, key);
+      const auto foreground = provider.GetColor(ui::kColorSysOnPrimary);
+      const auto background = provider.GetColor(ui::kColorSysPrimary);
+      branded_buttons &= color_utils::GetContrastRatio(foreground, background) >= 4.5f;
+      branded_states &= provider.GetColor(ui::kColorTextSelectionBackground) != background &&
+          provider.GetColor(ui::kColorSysStateFocusRing) == AccentColor(accent, dark);
+    }
+  }
+  expect("brand actions have readable text in light and dark across all Space accents",
+      branded_buttons);
+  expect("selection and keyboard focus each have a color from the Space palette",
+      branded_states);
+  expect("normal window actions, links and checkboxes use the same brand primary",
+      GetColorProvider()->GetColor(ui::kColorButtonBackgroundProminent) ==
+          GetColorProvider()->GetColor(ui::kColorSysPrimary) &&
+      GetColorProvider()->GetColor(ui::kColorLinkForegroundDefault) ==
+          GetColorProvider()->GetColor(ui::kColorSysPrimary) &&
+      GetColorProvider()->GetColor(ui::kColorCheckboxContainer) ==
+          GetColorProvider()->GetColor(ui::kColorSysPrimary));
   auto* avatar = toolbar->GetViewByID(VIEW_ID_AVATAR_BUTTON);
   expect("regular product windows have no visible browser account button", !avatar || !avatar->IsDrawn());
   expect("retired browser account commands cannot open their UI", !chrome::IsCommandEnabled(browser_, IDC_SHOW_AVATAR_MENU) &&

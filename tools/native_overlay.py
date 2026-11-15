@@ -592,6 +592,13 @@ def changes():
         '          ? SK_ColorWHITE : SK_ColorBLACK, *color, static_cast<SkAlpha>(12));\n'
         '    }\n  }\n'
         '  background_color_ = gfx::Tween::ColorValueBetween(opacity, normal, hovered);\n  if (is_caret_visible && !quiet_home) {')
+    location = replace_once(location,
+        '    views::FocusRing::Get(this)->SetOutsetFocusRingDisabled(true);',
+        '    views::FocusRing::Get(this)->SetOutsetFocusRingDisabled(true);\n'
+        '    if (base::CommandLine::ForCurrentProcess()->HasSwitch("sidebar-browser") &&\n'
+        '        !browser_->GetProfile()->IsOffTheRecord()) {\n'
+        '      views::FocusRing::Get(this)->SetColorId(kColorOmniboxResultsFocusIndicator);\n'
+        '    }')
     widget = upstream(WIDGET).decode()
     widget = replace_once(widget, '#include "chrome/browser/ui/views/frame/browser_widget.h"',
         '#include "chrome/browser/ui/views/frame/browser_widget.h"\n'

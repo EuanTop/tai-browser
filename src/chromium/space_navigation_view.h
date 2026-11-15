@@ -87,6 +87,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   bool HasPrideBackdrop() const;
   bool IsDark() const;
   std::optional<SkColor> page_chrome_color() const { return page_chrome_color_; }
+  std::optional<int> space_chrome_accent() const { return space_chrome_accent_; }
   int page_chrome_accent() const { return page_chrome_accent_; }
   void AddedToWidget() override;
   void RemovedFromWidget() override;
@@ -270,6 +271,7 @@ class SpaceNavigationView final : public views::BoxLayoutView,
   std::unique_ptr<PageChromeObserver> page_chrome_observer_;
   std::optional<SkColor> page_chrome_color_;
   int page_chrome_accent_ = 0;
+  std::optional<int> space_chrome_accent_;
   bool page_chrome_refresh_pending_ = false;
   class ClearObserver;
   struct PendingClear { std::string space; int position; std::unique_ptr<ClearObserver> observer; };
