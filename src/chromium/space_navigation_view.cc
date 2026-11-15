@@ -97,6 +97,7 @@
 #include "ui/base/models/dialog_model.h"
 #include "chrome/browser/ui/view_ids.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
 #include "chrome/browser/ui/navigator/browser_navigator.h"
 #include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
