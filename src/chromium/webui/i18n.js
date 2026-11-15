@@ -132,6 +132,8 @@ const english = {
   "浏览器管理": "Browser management",
   "Chromium 原生功能": "Chromium features",
   "Chromium 管理页": "Chromium management pages",
+  "默认浏览器": "Default browser",
+  "检查或将 TAi 设为默认浏览器": "Check or make TAi your default browser",
   "通用设置": "General settings",
   "搜索引擎、隐私与安全、网站权限": "Search, privacy, security and site permissions",
   "历史记录": "History",

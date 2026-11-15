@@ -66,6 +66,7 @@
 #include "ui/views/animation/animation_builder.h"
 #include "ui/views/animation/animation_delegate_views.h"
 #include "ui/gfx/canvas.h"
+#include "ui/gfx/codec/png_codec.h"
 #include "ui/gfx/color_utils.h"
 #include "ui/views/button_drag_utils.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
@@ -3747,6 +3748,35 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
   static bool started = false;
   if (started) return;
   started = true;
+  const auto* command = base::CommandLine::ForCurrentProcess();
+  if (command->HasSwitch("tai-test-capture-window")) {
+    auto* widget = GetWidget();
+    if (!widget || !widget->GetCompositor()) return;
+    auto* compositor = widget->GetCompositor();
+    compositor->root_layer()->RequestCopyOfOutput(
+        std::make_unique<viz::CopyOutputRequest>(
+            viz::CopyOutputRequest::ResultFormat::RGBA,
+            viz::CopyOutputRequest::ResultDestination::kSystemMemory,
+            base::BindOnce(
+                [](base::FilePath path,
+                   std::unique_ptr<viz::CopyOutputResult> result) {
+                  const auto pixels = result->ScopedAccessSkBitmap();
+                  const auto& bitmap = pixels.bitmap();
+                  if (bitmap.empty()) return;
+                  auto bytes = gfx::PNGCodec::EncodeBGRASkBitmap(
+                      bitmap, /*discard_transparency=*/true);
+                  if (!bytes) return;
+                  base::ThreadPool::PostTask(
+                      FROM_HERE, {base::MayBlock()},
+                      base::BindOnce([](base::FilePath output,
+                                        std::vector<uint8_t> png) {
+                        base::WriteFile(output, png);
+                      }, std::move(path), std::move(*bytes)));
+                },
+                data_dir.AppendASCII("ReadmeWindow.png"))));
+    compositor->ScheduleDraw();
+    return;
+  }
   SyncTabs();
   base::ListValue checks;
   RunShortcutValidationChecks(checks);
