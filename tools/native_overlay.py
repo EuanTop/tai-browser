@@ -576,6 +576,7 @@ def changes():
     location = upstream(LOCATION).decode()
     location = replace_once(location, '#include "chrome/browser/ui/views/location_bar/location_bar_view.h"',
         '#include "chrome/browser/ui/views/location_bar/location_bar_view.h"\n'
+        '#include "base/command_line.h"\n'
         '#include "sidebar_browser/space_navigation_view.h"')
     location = replace_once(location,
         '  background_color_ = gfx::Tween::ColorValueBetween(opacity, normal, hovered);\n  if (is_caret_visible) {',

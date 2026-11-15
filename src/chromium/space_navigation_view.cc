@@ -820,16 +820,22 @@ bool UsesSystemContrast(const ui::ColorProviderKey& key) {
          key.forced_colors != ui::ColorProviderKey::ForcedColors::kNone;
 }
 
+SkColor BrandActionColor(int accent, bool dark) {
+  if (accent == kAtriumAccent) return dark ? 0xffaaa1dc : 0xff39375f;
+  if (accent == kPrideAccent) return dark ? 0xffc9aff1 : 0xff5e477b;
+  return color_utils::HSLToSkColor(
+      {AccentHue(accent), 0.38, dark ? 0.77 : 0.32}, SK_AlphaOPAQUE);
+}
+
+SkColor BrandActionTextColor(bool dark) {
+  return dark ? 0xff1c1d31 : SK_ColorWHITE;
+}
+
 void AddBrandAccents(ui::ColorMixer& mixer, bool dark, int accent) {
   // Atrium uses the same action colors as TAi Settings. Custom Space
   // colors contribute their hue while the controls retain readable contrast.
-  SkColor action = color_utils::HSLToSkColor(
-      {AccentHue(accent), 0.38, dark ? 0.77 : 0.32}, SK_AlphaOPAQUE);
-  if (accent == kAtriumAccent)
-    action = dark ? 0xffaaa1dc : 0xff39375f;
-  if (accent == kPrideAccent)
-    action = dark ? 0xffc9aff1 : 0xff5e477b;
-  const SkColor on_action = dark ? 0xff1c1d31 : SK_ColorWHITE;
+  const SkColor action = BrandActionColor(accent, dark);
+  const SkColor on_action = BrandActionTextColor(dark);
   const auto tonal = ui::AlphaBlend(ui::kColorSysPrimary, ui::kColorSysSurface,
                                     dark ? 58 : 24);
   mixer[ui::kColorSysPrimary] = {action};
@@ -888,9 +894,26 @@ class PageChromePalette final : public ui::ColorProviderKey::InitializerSupplier
     const SkColor focus = AccentColor(space_accent_, dark);
     mixer[ui::kColorFocusableBorderFocused] = {focus};
     mixer[ui::kColorSysStateFocusRing] = {focus};
-    mixer[kColorOmniboxResultsFocusIndicator] = {focus};
-    if (toolbar_ == ToolbarPalette::kNative) return;
-    const bool dark_page = toolbar_ == ToolbarPalette::kDarkPage;
+    // The address bar keeps page-edge contrast while browser actions use the Space.
+    const bool dark_toolbar = toolbar_ == ToolbarPalette::kNative
+                                  ? dark : toolbar_ == ToolbarPalette::kDarkPage;
+    if (toolbar_ != ToolbarPalette::kNative) {
+      ApplyToolbarContrast(mixer, key, dark_toolbar);
+    }
+    const SkColor toolbar_action = BrandActionColor(space_accent_, dark_toolbar);
+    const SkColor toolbar_focus = AccentColor(page_accent_, dark_toolbar);
+    mixer[kColorOmniboxResultsFocusIndicator] = {toolbar_focus};
+    mixer[kColorOmniboxResultsUrl] = {toolbar_action};
+    mixer[kColorOmniboxResultsUrlSelected] = {kColorOmniboxResultsUrl};
+    mixer[kColorOmniboxKeywordSelected] = {kColorOmniboxResultsUrl};
+    mixer[kColorOmniboxComposeboxPrimaryAction] = {toolbar_action};
+    mixer[kColorOmniboxComposeboxSubmitButtonIcon] = {BrandActionTextColor(dark_toolbar)};
+    mixer[kColorToolbarFeaturePromoHighlight] = {toolbar_action};
+  }
+
+ private:
+  void ApplyToolbarContrast(ui::ColorMixer& mixer, const ui::ColorProviderKey& key,
+                            bool dark_page) const {
     auto reference_key = key;
     reference_key.app_controller = nullptr;
     reference_key.color_mode = dark_page ? ui::ColorProviderKey::ColorMode::kDark
@@ -900,13 +923,8 @@ class PageChromePalette final : public ui::ColorProviderKey::InitializerSupplier
       if (name.starts_with("kColorToolbar") || name.starts_with("kColorOmnibox") ||
           name.starts_with("kColorLocationBar")) mixer[id] = {reference->GetColor(id)};
     }
-    // The address bar tracks the page edge. Other browser controls track the
-    // Space, even when the site above which they're shown has another color.
-    const auto page_focus = AccentColor(page_accent_, dark_page);
-    mixer[kColorOmniboxResultsFocusIndicator] = {page_focus};
   }
 
- private:
   const ToolbarPalette toolbar_;
   const int page_accent_;
   const int space_accent_;
@@ -4679,10 +4697,8 @@ void SpaceNavigationView::RunSmokeTest(tabs::VerticalTabStripStateController* st
                           : ui::ColorProviderKey::ColorMode::kLight;
     key.contrast_mode = ui::ColorProviderKey::ContrastMode::kNormal;
     key.forced_colors = ui::ColorProviderKey::ForcedColors::kNone;
-    // The cache owns supplier pointers, so use the process-lifetime window key
-    // for live probes and local providers for the complete palette coverage.
+    const auto* baseline = ui::ColorProviderManager::Get().GetColorProviderFor(key);
     for (int accent = 0; accent < kAccentCount; ++accent) {
-      const auto* baseline = ui::ColorProviderManager::Get().GetColorProviderFor(key);
       ui::ColorProvider provider;
       auto& base_colors = provider.AddMixer();
       for (auto id : {ui::kColorSysSurface, ui::kColorSysOnSurface})
